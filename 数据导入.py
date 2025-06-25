@@ -3,7 +3,7 @@ from sqlalchemy import create_engine
 
 # 数据库连接
 db_user = 'root'
-db_password = 'yjc1234560'
+db_password = 'xzy20010506'
 db_host = 'localhost'
 db_port = '3306'
 
