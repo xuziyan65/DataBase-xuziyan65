@@ -2,17 +2,21 @@ import streamlit as st
 import pandas as pd
 import re
 from sqlalchemy import create_engine, text
+from pathlib import Path
 
-# — 数据库连接配置 —
-db_user     = 'root'
-db_password = 'xzy20010506'
-db_host     = 'localhost'
-db_port     = '3306'
-db_name     = 'my_database'
-engine      = create_engine(
-    f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-)
+# 自动定位到项目根目录下的 product.db
+DB_PATH = Path(__file__).resolve().parents[1] / "Product.db"
+engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
+@st.cache_data  # 可选：缓存查询结果，减少重复打开数据库
+def load_data():
+    query = "SELECT * FROM Products"  # 注意首字母大写且是复数
+    return pd.read_sql(query, engine)
+
+df = load_data()
+
+
+# — 同义词映射，只针对描述搜索生效 —
 # — 同义词映射，只针对描述搜索生效 —
 SYNONYMS = {
     "大小头": "异径直通",
@@ -106,7 +110,7 @@ qty        = st.number_input("请输入数量", min_value=1, value=1)
 price_type = st.selectbox("请选择使用的价格字段", ["出厂价_含税","出厂价_不含税"])
 
 if st.button("查询"):
-    df      = pd.read_sql(text("SELECT * FROM product"), engine)
+    df      = pd.read_sql(text("SELECT * FROM Products"), engine)
     results = []
 
     # —— 物料号查询分支 —— 
@@ -117,7 +121,7 @@ if st.button("查询"):
             price = getattr(row, price_type, 0) or 0
             results.append({
                 "物料编号": getattr(row,"Material",""),
-                "产品描述": getattr(row,"Description",""),
+                "产品描述": getattr(row,"Describrition",""),
                 "单价":     price,
                 "数量":     float(qty),
                 "总价":     price * float(qty)
@@ -156,7 +160,7 @@ if st.button("查询"):
 
         # 4) 遍历产品库
         for row in df.itertuples(index=False):
-            desc = str(getattr(row,"Description",""))
+            desc = str(getattr(row,"Describrition",""))
             norm = normalize_text(desc)
 
             # 数字过滤：
