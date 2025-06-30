@@ -121,8 +121,8 @@ if st.button("查询"):
                 "物料编号": getattr(row,"Material",""),
                 "产品描述": getattr(row,"Describrition",""),
                 "单价":     price,
-                "数量":     float(qty),
-                "总价":     price * float(qty)
+                "数量":     int(qty),
+"总价": float(price.replace(',', '')) * int(qty) if isinstance(price, str) else float(price) * int(qty)
             })
 
     # —— 描述 + 数字 分支 —— 
@@ -190,8 +190,8 @@ if st.button("查询"):
                 "物料编号": getattr(row,"Material",""),
                 "产品描述": desc,
                 "单价":     price,
-                "数量":     float(qty),
-                "总价":     price * float(qty)
+                "数量":     int(qty),
+"总价": float(price.replace(',', '')) * int(qty) if isinstance(price, str) else float(price) * int(qty)
             })
 
     st.session_state.last_out = pd.DataFrame(results)
