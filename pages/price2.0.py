@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, text
 from pathlib import Path
 
 # 自动定位到项目根目录下的 product.db
-DB_PATH = Path(__file__).resolve().parents[1] / "Product.db"
+DB_PATH = Path(__file__).resolve().parents[1] / "Product1.db"
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
 @st.cache_data  # 可选：缓存查询结果，减少重复打开数据库
