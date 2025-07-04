@@ -44,14 +44,22 @@ h1, h2 {
 """, unsafe_allow_html=True)
 
 # — 通用设置 & 数据库连接 —
-DB_PATH = Path(__file__).resolve().parents[1] / "Product1.db"
+DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"timeout":20}, echo=False)
 
+
+#从数据库读取产品数据，并对结果进行缓存
 @st.cache_data
 def load_data():
     return pd.read_sql("SELECT * FROM Products", engine)
-
-
+if "show_more" not in st.session_state:
+    st.session_state.show_more = False
+    
+def is_token_in_text(token, text):
+    # 匹配完整的英寸单位
+    # 前面不是数字或斜杠，后面不是数字、斜杠或连字符
+    return re.search(rf'(?<![\d/-]){re.escape(token)}(?![\d/\\-])', text) is not None
+# 归一化产品描述，将常见变体统一为标准形式
 def normalize_material(s: str) -> str:
     s = s.lower()
     s = s.replace('－', '-').replace('—', '-').replace('–', '-')
@@ -66,10 +74,15 @@ def normalize_material(s: str) -> str:
     # 只把常见分隔符替换成空格，保留*号
     s = re.sub(r'[\|,;，；]', ' ', s)
     s = re.sub(r'\s+', ' ', s)
-    if "异径三通" in s:
-        print("归一化后描述：", s)
+    # 统一英寸符号
+    s = s.replace('＂', '"').replace('"', '"').replace('"', '"')
+    s = re.sub(r'\\s*\"\\s*', '"', s)  # 去除英寸符号前后空格
+    s = s.replace('in', '"')           # 2in -> 2"
+    s = s.replace('英寸', '"')
+    # 可根据实际情况添加更多变体
     return s.strip()
 
+# 插入新产品的函数
 def insert_product(values: dict):
     values.pop("序号", None)
     cols   = ", ".join(values.keys())
@@ -92,57 +105,110 @@ SYNONYM_GROUPS = [
     {"扫除口", "清扫口"}
 ]
 
-mm_to_inch = {"20": '1/2"', "25": '3/4"',
-              "32": '1"', "50": '1-1/2"',
-              "63": '2"', "75": '2-1/2"',
-              "90": '3"', "110": '4"'}
-inch_to_mm = {v:k for k,v in mm_to_inch.items()}
+# PVC管道英寸-毫米对照
+mm_to_inch_pvc = {
+    "16": '1/2"', "20": '3/4"', "25": '1"', "35": '1-1/4"', "40": '1-1/2"', "50": '2"',
+    "65": '2-1/2"', "75": '3"', "100": '4"', "125": '5"', "150": '6"', "200": '8"',
+    "250": '10"', "300": '12"'
+}
+inch_to_mm_pvc = {v: k for k, v in mm_to_inch_pvc.items()}
 
+# PPR管道英寸-毫米对照
+mm_to_inch_ppr = {
+    "20": '1/2"', "25": '3/4"', "32": '1"', "40": '1-1/4"', "50": '1-1/2"', "63": '2"',
+    "75": '2-1/2"', "90": '3"', "110": '4"', "160": '6"'
+}
+inch_to_mm_ppr = {v: k for k, v in mm_to_inch_ppr.items()}
+
+#查找某个词的同义词集合，用于后续检索时自动扩展同义词匹配。如果没有同义词，就只返回自己。
 def get_synonym_words(word):
     for group in SYNONYM_GROUPS:
         if word in group:
             return group
     return {word}
 
-def expand_unit_tokens(token):
+# 扩展单位符号，比如dn20*20，会扩展为dn20、dn20*20、20、20*20
+def expand_unit_tokens(token, material=None):
     eqs = {token}
-    # 支持dn前缀
+    # 选择对照表
+    if material == "pvc":
+        mm_to_inch = mm_to_inch_pvc
+        inch_to_mm = inch_to_mm_pvc
+    elif material == "ppr":
+        mm_to_inch = mm_to_inch_ppr
+        inch_to_mm = inch_to_mm_ppr
+    else:
+        mm_to_inch = {**mm_to_inch_pvc, **mm_to_inch_ppr}
+        inch_to_mm = {**inch_to_mm_pvc, **inch_to_mm_ppr}
     if token.startswith('dn'):
         num = token[2:]
         if num in mm_to_inch:
             eqs.add(mm_to_inch[num])
-            # 也可以加 'dn'+英寸
-            eqs.add('dn' + mm_to_inch[num])
-            if num in inch_to_mm:
-                eqs.add('dn' + inch_to_mm[num])
+        eqs.add(num)
     else:
         if token in mm_to_inch:
             eqs.add(mm_to_inch[token])
+            eqs.add('dn' + token)
         if token in inch_to_mm:
             eqs.add(inch_to_mm[token])
     return eqs
 
-def expand_token_with_synonyms_and_units(token):
+#前两个函数的集合
+def expand_token_with_synonyms_and_units(token, material=None):
     # 先查同义词组
     synonyms = get_synonym_words(token)
     expanded = set()
     for syn in synonyms:
-        expanded |= expand_unit_tokens(syn)
+        expanded |= expand_unit_tokens(syn, material=material)
     return expanded
-    
+
+# 将中文描述切分为单词列表，并自动扩展同义词和单位符号，
+# "PPR dn20*25 直接头"，['ppr', 'dn20*25', '20*25', '20', '25', '直接', '头']
 def split_with_synonyms(text):
+    # 0. 预处理：标准化各种可能造成解析问题的字符
+    text = text.replace('（', '(').replace('）', ')')
+    text = text.replace('＂', '"')  # 全角引号
+    text = text.replace('－', '-')  # 全角连字符
+
+    # 预分词：解决 "PPRDN20" 这类连写问题
+    text = re.sub(r'([A-Z])(DN)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(DN)(\d)', r'\1 \2', text, flags=re.IGNORECASE)
+
+    # 移除括号，防止干扰英寸规格解析
+    text = text.replace('(', ' ').replace(')', ' ')
+
     text = text.lower()
+    text = text.replace('*', ' * ')
+
     tokens = []
     # 先提取 dn+数字*数字
-    pattern_dn = re.compile(r'dn\d+\*\d+')
+    pattern_dn_star = re.compile(r'dn(\d+)\*(\d+)')
+    for m in pattern_dn_star.finditer(text):
+        tokens.append(m.group())
+        tokens.append(f"{m.group(1)}*{m.group(2)}")
+        tokens.append(m.group(1))
+        tokens.append(m.group(2))
+    text = pattern_dn_star.sub(' ', text)
+    # 再提取 dn+数字
+    pattern_dn = re.compile(r'dn(\d+)')
     for m in pattern_dn.finditer(text):
         tokens.append(m.group())
+        tokens.append(m.group(1))
     text = pattern_dn.sub(' ', text)
     # 再提取 数字*数字
-    pattern_num = re.compile(r'\d+\*\d+')
+    pattern_num = re.compile(r'(\d+)\*(\d+)')
     for m in pattern_num.finditer(text):
         tokens.append(m.group())
+        tokens.append(m.group(1))
+        tokens.append(m.group(2))
     text = pattern_num.sub(' ', text)
+    
+    # 修正：移除英寸正则表达式中不必要的反斜杠
+    pattern_inch = re.compile(r'\d+-\d+/\d+"|\d+/\d+"|\d+"')
+    for m in pattern_inch.finditer(text):
+        tokens.append(m.group())
+    text = pattern_inch.sub(' ', text)
+
     # 再提取连续英文/拼音
     pattern_en = re.compile(r'[a-zA-Z]+')
     for m in pattern_en.finditer(text):
@@ -155,8 +221,22 @@ def split_with_synonyms(text):
     text = pattern_digit.sub(' ', text)
     # 剩下的按单字切分
     tokens += [c for c in text if c.strip()]
-    return tokens
+    
+    # 去掉 'dnXX'，如果 'XX' 也在 tokens 里
+    filtered = []
+    token_set = set(tokens)
+    for t in tokens:
+        if re.fullmatch(r'dn(\d+)', t):
+            num = t[2:]
+            if num in token_set:
+                continue  # 跳过 'dnXX'
+        filtered.append(t)
+    return filtered
 
+#前三函数总和，输入："PPR dn20*25 直接头"
+#输出：material_tokens: ['ppr']
+#digit_tokens: ['2', '0', '2', '5']
+#chinese_tokens: ['ppr', 'dn20*25', '20*25', '20', '25', '直接', '头']
 def classify_tokens(keyword):
     norm_kw = normalize_material(keyword)
     # 材质
@@ -167,42 +247,83 @@ def classify_tokens(keyword):
     chinese_tokens = split_with_synonyms(keyword)
     return material_tokens, digit_tokens, chinese_tokens
 
+
 def search_with_keywords(df, keyword, field, strict=True, return_score=False):
-    material_tokens, digit_tokens, chinese_tokens = classify_tokens(keyword.strip())
-    digit_counter = Counter(digit_tokens)
+    material_tokens, _, chinese_tokens = classify_tokens(keyword.strip())
+    
+    query_size_tokens = {t for t in chinese_tokens if re.search(r'\d', t)}
+    query_text_tokens = {t for t in chinese_tokens if not re.search(r'\d', t)}
+
+    # 1. 为每个查询规格，创建一个包含所有等价写法的集合
+    query_spec_equivalents = {}
+    query_material = material_tokens[0] if material_tokens else None
+    for token in query_size_tokens:
+        query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
+    
     results = []
     for row in df.itertuples(index=False):
-        text = normalize_material(str(getattr(row, field, "")))
-        # 材质必须全部命中
-        if not all(m in text for m in material_tokens):
+        raw_text = str(getattr(row, field, ""))
+        normalized_text = normalize_material(raw_text)
+
+        if not all(m in normalized_text for m in material_tokens):
             continue
-        text_digit_counter = Counter(re.findall(r'\d', text))
-        if not strict:
-            # 模糊查询时，要求数字出现和次数与输入一致
-            if digit_counter and text_digit_counter != digit_counter:
+
+        product_all_tokens = split_with_synonyms(raw_text)
+        text_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
+        
+        if len(query_size_tokens) > len(text_specs):
+            continue
+ 
+        if query_size_tokens:
+            unmatched_text_specs = text_specs.copy()
+            all_query_specs_matched = True
+            for q_spec, q_equivalents in query_spec_equivalents.items():
+                match_found = False
+                for t_spec in list(unmatched_text_specs):
+                    if t_spec in q_equivalents:
+                        match_found = True
+                        unmatched_text_specs.remove(t_spec)
+                        break
+                if not match_found:
+                    all_query_specs_matched = False
+                    break
+            
+            if not all_query_specs_matched:
                 continue
-        # 中文部分（同义词扩展）
-        hit_count = 0
+
+        material_keywords_in_query = {'pvc', 'ppr'}.intersection(query_text_tokens)
+        if material_keywords_in_query:
+            if not any(mat in normalized_text.lower() for mat in material_keywords_in_query):
+                continue
+
+        hit_count = len(query_size_tokens)
+        
         if strict:
-            if not all(any(syn in text for syn in expand_token_with_synonyms_and_units(c)) for c in chinese_tokens):
+            if not all(t in normalized_text.lower() for t in query_text_tokens):
                 continue
-            hit_count = len(chinese_tokens)
+            hit_count += len(query_text_tokens)
         else:
-            hit_count = sum(1 for c in chinese_tokens if any(syn in text for syn in expand_token_with_synonyms_and_units(c)))
-            if chinese_tokens and hit_count == 0:
+            product_text_lower = normalized_text.lower()
+            for token in query_text_tokens:
+                if token in product_text_lower:
+                    hit_count += 1
+            if query_text_tokens and hit_count == len(query_size_tokens):
                 continue
+        
         if return_score:
-            score = hit_count / len(chinese_tokens) if chinese_tokens else 1
+            total_tokens = len(query_size_tokens) + len(query_text_tokens)
+            score = hit_count / total_tokens if total_tokens > 0 else 1
             results.append((row, score))
         else:
             results.append(row)
+            
     return results
 
 # — Session State 初始化 —
 for k, default in [("cart",[]),("last_out",pd.DataFrame()),("to_cart",[]),("to_remove",[])]:
     if k not in st.session_state:
         st.session_state[k] = default
-
+#把用户选中的查询结果条目加入购物车，并清空本次选择，支持多选批量添加
 def add_to_cart():
     for i in st.session_state.to_cart:
         st.session_state.cart.append(st.session_state.last_out.loc[i].to_dict())
@@ -210,6 +331,7 @@ def add_to_cart():
     if "to_cart" in st.session_state:
         del st.session_state["to_cart"]
 
+#删除购物车中的条目，支持多选批量删除
 def remove_from_cart():
     idxs = set(st.session_state.to_remove)
     st.session_state.cart = [it for j,it in enumerate(st.session_state.cart) if j not in idxs]
@@ -227,8 +349,7 @@ st.sidebar.caption("Powered by Streamlit")
 if page == "查询产品":
     st.header("产品查询系统")
     df = load_data()
-
-    
+#输入框布局
     c1, c3 = st.columns([6,1])
     with c1:
         keyword = st.text_input(
@@ -251,6 +372,7 @@ if page == "查询产品":
         key="fuzzy_mode"
     )
 
+    #查询按钮
     if st.button("查询"):
         out_df = pd.DataFrame()
         qty = st.session_state.qty if "qty" in st.session_state else 1
@@ -271,6 +393,7 @@ if page == "查询产品":
         else:
             # 原有关键词查找逻辑
             results = search_with_keywords(df, st.session_state.keyword, "Describrition", strict=True)
+            #模糊查询
             if not results and st.session_state.fuzzy_mode:
                 fuzzy_results = search_with_keywords(df, st.session_state.keyword, "Describrition", strict=False, return_score=True)
                 if fuzzy_results:
@@ -280,10 +403,19 @@ if page == "查询产品":
                     out_df["数量"] = qty
                     show_cols_fuzzy = show_cols + ["匹配度"]
                     out_df = out_df[[col for col in show_cols_fuzzy if col in out_df.columns]]
-                    st.session_state.last_out = out_df
+
+                    # -- 新逻辑：展示匹配度排名前三的结果 --
+                    # 获取匹配度的唯一值并降序排列
+                    unique_scores = sorted(out_df["匹配度"].unique(), reverse=True)
+                    # 获取前三高的分数
+                    top_3_scores = unique_scores[:3]
+                    # 筛选出匹配度在前三高的所有行
+                    top_df = out_df[out_df["匹配度"].isin(top_3_scores)]
+                    st.session_state.last_out = top_df
                 else:
                     st.session_state.last_out = pd.DataFrame()
                     st.warning("⚠️ 未查询到符合条件的产品")
+            #精准查询
             elif results:
                 out_df = pd.DataFrame(results)
                 out_df["数量"] = qty
@@ -390,5 +522,11 @@ else:
             delete_products(materials)
             load_data.clear()
             st.success("✅ 删除成功！")
+
+def is_token_in_text(token, text):
+    # 匹配完整的英寸单位
+    # 前面不是数字或斜杠，后面不是数字、斜杠或连字符
+    return re.search(rf'(?<![\d/-]){re.escape(token)}(?![\d/\\-])', text) is not None
+
 
 
