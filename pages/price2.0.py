@@ -44,7 +44,7 @@ h1, h2 {
 """, unsafe_allow_html=True)
 
 # — 通用设置 & 数据库连接 —
-DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
+DB_PATH = Path(__file__).resolve().parents[1] / "Product1.db"
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"timeout":20}, echo=False)
 
 
