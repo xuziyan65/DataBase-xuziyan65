@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 from pathlib import Path
 from collections import Counter
 from openai import OpenAI
@@ -112,8 +113,25 @@ h1, h2 {
 """, unsafe_allow_html=True)
 
 # — 通用设置 & 数据库连接 —
-DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"timeout":20}, echo=False)
+@st.cache_resource
+def get_db_engine():
+    """
+    Creates a cached database engine for the Streamlit app.
+    Using @st.cache_resource ensures that the connection is established only once
+    per session. The StaticPool is crucial for SQLite to prevent "database is locked"
+    errors in Streamlit's multi-threaded environment by ensuring all operations
+    use the same underlying connection.
+    """
+    DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
+    engine = create_engine(
+        f"sqlite:///{DB_PATH}",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        echo=False
+    )
+    return engine
+
+engine = get_db_engine()
 
 
 #从数据库读取产品数据，并对结果进行缓存
