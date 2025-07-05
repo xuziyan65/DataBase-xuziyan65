@@ -6,16 +6,16 @@ from pathlib import Path
 from collections import Counter
 from openai import OpenAI
 
-# --- 在这里输入您的API KEY ---
-OPENAI_API_KEY = "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"
+# --- 安全地从 Streamlit Secrets 获取 API KEY ---
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 
 # --- AI 选择功能 (GPT-4o-mini) ---
 def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
     """
     Uses GPT-4o-mini to select the best match from a DataFrame of candidates.
     """
-    if not OPENAI_API_KEY or OPENAI_API_KEY == "YOUR_OPENAI_API_KEY_HERE":
-        return None, "错误：请先在代码中设置您的 OpenAI API Key。"
+    if not OPENAI_API_KEY:
+        return None, "错误：请在 Streamlit Cloud 的 Secrets 中设置您的 OpenAI API Key。"
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -69,7 +69,7 @@ def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
     except Exception as e:
         error_message = str(e)
         if "Incorrect API key" in error_message:
-            return None, "AI调用失败：API Key不正确或已失效。"
+            return None, "AI调用失败：API Key不正确或已失效。请检查 Streamlit Cloud 中的配置。"
         return None, f"AI调用失败：{error_message}"
 # --- 结束 AI 功能 ---
 
@@ -830,7 +830,5 @@ else:
             delete_products(materials)
             load_data.clear()
             st.success("✅ 删除成功！")
-
-
 
 
