@@ -122,7 +122,7 @@ def get_db_engine():
     errors in Streamlit's multi-threaded environment by ensuring all operations
     use the same underlying connection.
     """
-    DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
+    DB_PATH = Path(__file__).resolve().parents[1] / "Product1.db"
     engine = create_engine(
         f"sqlite:///{DB_PATH}",
         connect_args={"check_same_thread": False},
