@@ -122,7 +122,7 @@ def get_db_engine():
     errors in Streamlit's multi-threaded environment by ensuring all operations
     use the same underlying connection.
     """
-    DB_PATH = Path(__file__).resolve().parents[1] / "Product1.db"
+    DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
     engine = create_engine(
         f"sqlite:///{DB_PATH}",
         connect_args={"check_same_thread": False},
@@ -409,76 +409,129 @@ def classify_tokens(keyword):
     return material_tokens, digit_tokens, chinese_tokens
 
 
+def expand_keyword_with_synonyms(keyword: str) -> list[str]:
+    """
+    Expands a keyword into a list of queries with synonyms replaced.
+    This happens BEFORE tokenization.
+    Example: "直接dn20" -> ["直接dn20", "直接头dn20", "直通dn20"]
+    """
+    # Create a map from a synonym to its group for easy lookup.
+    synonym_to_group = {syn: group for group in SYNONYM_GROUPS for syn in group}
+    # Sort all available synonyms by length, descending.
+    # This ensures that longer synonyms (e.g., "异径直通") are matched before
+    # their shorter substrings (e.g., "直通").
+    sorted_synonyms = sorted(synonym_to_group.keys(), key=len, reverse=True)
+
+    # Use a set for the initial list of queries to handle duplicates.
+    queries = {keyword}
+
+    # Iterate through the sorted list of synonyms.
+    for syn in sorted_synonyms:
+        # Create a temporary list to hold newly generated queries.
+        new_queries = set()
+        for q in queries:
+            # If the synonym is found in the current query...
+            if syn in q:
+                # ...get its synonym group.
+                group = synonym_to_group[syn]
+                # And for each synonym in that group...
+                for replacement in group:
+                    # ...create a new query by replacing the original synonym.
+                    new_queries.add(q.replace(syn, replacement))
+        
+        # After checking all existing queries for a given synonym,
+        # update the main set of queries with the new variations.
+        # This prevents replacement loops and combinatorial explosion within a single pass.
+        if new_queries:
+            queries.update(new_queries)
+
+    return list(queries)
+
+
 def search_with_keywords(df, keyword, field, strict=True, return_score=False):
-    material_tokens, _, chinese_tokens = classify_tokens(keyword.strip())
-    
-    query_size_tokens = {t for t in chinese_tokens if re.search(r'\d', t) and not t.endswith('°')}
-    query_text_tokens = {t for t in chinese_tokens if not (re.search(r'\d', t) and not t.endswith('°'))}
+    # --- MODIFIED: Expand keyword with synonyms before processing ---
+    expanded_keywords = expand_keyword_with_synonyms(keyword.strip())
+    all_results = {} # Use dict to store unique results with the best score
 
-    # 1. 为每个查询规格，创建一个包含所有等价写法的集合
-    query_spec_equivalents = {}
-    query_material = material_tokens[0] if material_tokens else None
-    for token in query_size_tokens:
-        query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
-    
-    results = []
-    for row in df.itertuples(index=False):
-        raw_text = str(getattr(row, field, ""))
-        normalized_text = normalize_material(raw_text)
+    for kw in expanded_keywords:
+        material_tokens, _, chinese_tokens = classify_tokens(kw)
 
-        if not all(m in normalized_text for m in material_tokens):
-            continue
+        query_size_tokens = {t for t in chinese_tokens if re.search(r'\d', t) and not t.endswith('°')}
+        query_text_tokens = {t for t in chinese_tokens if not (re.search(r'\d', t) and not t.endswith('°'))}
 
-        product_all_tokens = split_with_synonyms(raw_text)
-        text_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
+        # 1. 为每个查询规格，创建一个包含所有等价写法的集合
+        query_spec_equivalents = {}
+        query_material = material_tokens[0] if material_tokens else None
+        for token in query_size_tokens:
+            query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
         
-        if len(query_size_tokens) > len(text_specs):
-            continue
- 
-        if query_size_tokens:
-            unmatched_text_specs = text_specs.copy()
-            all_query_specs_matched = True
-            for q_spec, q_equivalents in query_spec_equivalents.items():
-                match_found = False
-                for t_spec in list(unmatched_text_specs):
-                    if t_spec in q_equivalents:
-                        match_found = True
-                        unmatched_text_specs.remove(t_spec)
-                        break
-                if not match_found:
-                    all_query_specs_matched = False
-                    break
+        for row in df.itertuples(index=False):
+            # Use a unique identifier for each row to handle duplicates
+            row_identifier = getattr(row, "Describrition", str(row)) 
+            raw_text = str(getattr(row, field, ""))
+            normalized_text = normalize_material(raw_text)
+
+            if not all(m in normalized_text for m in material_tokens):
+                continue
+
+            product_all_tokens = split_with_synonyms(raw_text)
+            text_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
             
-            if not all_query_specs_matched:
+            if len(query_size_tokens) > len(text_specs):
                 continue
+    
+            if query_size_tokens:
+                unmatched_text_specs = text_specs.copy()
+                all_query_specs_matched = True
+                for q_spec, q_equivalents in query_spec_equivalents.items():
+                    match_found = False
+                    for t_spec in list(unmatched_text_specs):
+                        if t_spec in q_equivalents:
+                            match_found = True
+                            unmatched_text_specs.remove(t_spec)
+                            break
+                    if not match_found:
+                        all_query_specs_matched = False
+                        break
+                
+                if not all_query_specs_matched:
+                    continue
 
-        material_keywords_in_query = {'pvc', 'ppr'}.intersection(query_text_tokens)
-        if material_keywords_in_query:
-            if not any(mat in normalized_text.lower() for mat in material_keywords_in_query):
-                continue
+            material_keywords_in_query = {'pvc', 'ppr'}.intersection(query_text_tokens)
+            if material_keywords_in_query:
+                if not any(mat in normalized_text.lower() for mat in material_keywords_in_query):
+                    continue
 
-        hit_count = len(query_size_tokens)
-        
-        if strict:
-            if not all(t in normalized_text.lower() for t in query_text_tokens):
-                continue
-            hit_count += len(query_text_tokens)
-        else:
-            product_text_lower = normalized_text.lower()
-            for token in query_text_tokens:
-                if token in product_text_lower:
-                    hit_count += 1
-            if query_text_tokens and hit_count == len(query_size_tokens):
-                continue
-        
-        if return_score:
+            hit_count = len(query_size_tokens)
+            
+            if strict:
+                if not all(t in normalized_text.lower() for t in query_text_tokens):
+                    continue
+                hit_count += len(query_text_tokens)
+            else:
+                product_text_lower = normalized_text.lower()
+                for token in query_text_tokens:
+                    if token in product_text_lower:
+                        hit_count += 1
+                if query_text_tokens and hit_count == len(query_size_tokens):
+                    continue
+            
             total_tokens = len(query_size_tokens) + len(query_text_tokens)
             score = hit_count / total_tokens if total_tokens > 0 else 1
-            results.append((row, score))
-        else:
-            results.append(row)
             
-    return results
+            # Store or update the result if the score is higher
+            if row_identifier not in all_results or score > all_results[row_identifier][1]:
+                all_results[row_identifier] = (row, score)
+
+    # Convert the results dict back to a list
+    final_results = list(all_results.values())
+    # Sort results by score, descending
+    final_results.sort(key=lambda x: x[1], reverse=True)
+
+    if return_score:
+        return final_results
+    else:
+        return [res[0] for res in final_results]
 
 # — Session State 初始化 —
 for k, default in [("cart",[]),("last_out",pd.DataFrame()),("to_cart",[]),("to_remove",[])]:
@@ -848,5 +901,7 @@ else:
             delete_products(materials)
             load_data.clear()
             st.success("✅ 删除成功！")
+
+
 
 
