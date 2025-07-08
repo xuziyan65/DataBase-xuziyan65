@@ -29,22 +29,23 @@ def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
         choices_str += f"索引 {i}: {row['Describrition']}\n" # 使用真实的换行符
 
     prompt_lines = [
-        "你是一个专业的管道建材产品采购专家。你的任务是从一个产品列表中，根据用户的搜索请求，选出最匹配的一项。",
+        "你是一个专业的管道建材产品采购专家。",
+        "你的任务是从一个产品列表中，根据用户的搜索请求，选出最匹配的一项。",
+        "**请严格遵守以下规则：**",
+        '1. 如果用户的搜索请求中包含"异径直接"，你必须优先选择描述为"异径套"的产品。如果包含90°，优先选描述为90°的产品',
+        "2. 你的回答必须只包含你选择的产品的**索引数字**，不要有任何其他文字、解释或标点符号。",
+        "---",
         f"用户的搜索请求是: \"{keyword}\"",
-        f"以下是系统模糊匹配出的最相关的{len(df_reset)}个候选产品:",
+        f"以下是候选产品列表 (共{len(df_reset)}个):",
+        choices_str,
         "---",
-        choices_str,# 所有候选产品列表
-        "---",
-        "请仔细分析用户的请求和每个候选产品的描述，选出最符合用户意图的**唯一一个**产品。",
-        "你的回答必须严格遵循以下格式，只返回你选择的产品的**索引数字**，不要添加任何其他内容。",
-        "例如:",
-        "2"
+        "请根据以上规则和用户请求，从列表中选出最匹配的**唯一一个**产品，并仅返回其索引号。"
     ]
     prompt = "\n".join(prompt_lines)
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-nano",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "你是一个专业的管道建材产品采购专家。"},
                 {"role": "user", "content": prompt}
@@ -221,7 +222,7 @@ def get_synonym_words(word):
             return group
     return {word}
 
-# 扩展单位符号，比如dn20*20，会扩展为dn20、dn20*20、20、20*20
+# 扩展单位符号，比如dn20*20，会扩展为dn20*20、20*20、20、20*20
 def expand_unit_tokens(token, material=None):
     eqs = {token}
     # 选择对照表
@@ -253,7 +254,7 @@ def expand_unit_tokens(token, material=None):
         eqs.add(num) # '25'
         return eqs
 
-    # Case 2: 无论是否带引号的分数形式, e.g., '3/4"' or '3/4',先加引号然后转换成毫米数，再加dn,最后扩展成dn25,25,3/4",3/4"
+    # Case 2: An inch value, quoted or not, e.g., '3/4"' or '3/4'
     inch_lookup_token = token
     # Add quote if it's a fraction like "1/2", "1-1/2"
     if re.fullmatch(r'\d+-\d+/\d+|\d+/\d+', token):
@@ -266,7 +267,7 @@ def expand_unit_tokens(token, material=None):
         eqs.add(inch_lookup_token) # '3/4"'
         return eqs
 
-    # Case 3: A plain number, could be mm, e.g., '25'扩展成dn25,3/4",25
+    # Case 3: A plain number, could be mm, e.g., '25'
     if token.isdigit() and token in mm_to_inch:
         eqs.add('dn' + token) # 'dn25'
         eqs.add(mm_to_inch[token]) # '3/4"'
@@ -275,7 +276,7 @@ def expand_unit_tokens(token, material=None):
     return eqs
 
 
-#同义词扩展 + 单位扩展
+#前两个函数的集合
 def expand_token_with_synonyms_and_units(token, material=None):
     # 先查同义词组
     synonyms = get_synonym_words(token)
@@ -405,13 +406,12 @@ def split_with_synonyms(text):
 def classify_tokens(keyword):
     norm_kw = normalize_material(keyword)
     # 材质
-    material_tokens = re.findall(r'pvc-u|ppr|pvc conduit|pp', norm_kw)
+    material_tokens = re.findall(r'pvc|ppr|pe|pp|hdpe|pb|pert', norm_kw)
     # 数字 (修正：匹配包括小数在内的完整数字)
     digit_tokens = re.findall(r'\d+(?:\.\d+)?', norm_kw)
     # 中文同义词整体切分
     chinese_tokens = split_with_synonyms(keyword)
     return material_tokens, digit_tokens, chinese_tokens
-
 
 def expand_keyword_with_synonyms(keyword: str) -> list[str]: #分词前用
     """
@@ -457,12 +457,21 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
     expanded_keywords = expand_keyword_with_synonyms(keyword.strip()) #对关键词做同义词扩展
     all_results = {} # Use dict to store unique results with the best score
 
+    # --- RE-IMPLEMENTED: Rule-based prioritization ---
+    is_reducing_direct_query = False
+    for group in SYNONYM_GROUPS:
+        if "大小头" in group and any(kw in group for kw in expanded_keywords):
+            is_reducing_direct_query = True
+            break
+    
+    contains_90_deg = "90°" in keyword or "90度" in keyword
+    
     for kw in expanded_keywords:
         material_tokens, _, chinese_tokens = classify_tokens(kw) #材质相关的token和其他所有分出来的token
 
         #包含数字的 token（规格相关，如 "dn20"、"20"、"1/2"）
         query_size_tokens = {t for t in chinese_tokens if re.search(r'\d', t) and not t.endswith('°')}
-        #不包含数字的 token（名称/功能相关，如 "异径套"）
+        #不包含数字的 token（名称、材质相关）
         query_text_tokens = {t for t in chinese_tokens if not (re.search(r'\d', t) and not t.endswith('°'))}
 
         # 1. 为每个查询规格，创建一个包含所有等价写法的集合
@@ -471,24 +480,21 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
         for token in query_size_tokens:
             query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
         
-        #取出每一行产品的描述，做归一化。
         for row in df.itertuples(index=False):
             # Use a unique identifier for each row to handle duplicates
             row_identifier = getattr(row, "Describrition", str(row)) 
             raw_text = str(getattr(row, field, ""))
             normalized_text = normalize_material(raw_text)
 
-            #如果不包含所有材质 token，直接跳过。
             if not all(m in normalized_text for m in material_tokens):
                 continue
 
-            #把产品描述分词，提取出所有包含数字的 token（规格相关）。
             product_all_tokens = split_with_synonyms(raw_text)
             text_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
             
             if len(query_size_tokens) > len(text_specs):
                 continue
-    
+ 
             if query_size_tokens:
                 unmatched_text_specs = text_specs.copy()
                 all_query_specs_matched = True
@@ -506,14 +512,11 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
                 if not all_query_specs_matched:
                     continue
 
-            #材质关键词二次过滤（防止误命中）
             material_keywords_in_query = {'pvc', 'ppr'}.intersection(query_text_tokens)
             if material_keywords_in_query:
                 if not any(mat in normalized_text.lower() for mat in material_keywords_in_query):
                     continue
 
-            #严格模式：所有文本 token 也必须完全命中，分数加上文本 token 数量。
-            #模糊模式：文本 token 命中几个算几个，分数相应增加。
             hit_count = len(query_size_tokens)
             
             if strict:
@@ -531,20 +534,31 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             total_tokens = len(query_size_tokens) + len(query_text_tokens)
             score = hit_count / total_tokens if total_tokens > 0 else 1
             
-            # 对于同一产品，只保留匹配度最高的那一条。
+            # Store or update the result if the score is higher
             if row_identifier not in all_results or score > all_results[row_identifier][1]:
                 all_results[row_identifier] = (row, score)
 
     # Convert the results dict back to a list
     final_results = list(all_results.values())
-    # Sort results by score, descending
-    final_results.sort(key=lambda x: x[1], reverse=True)
+
+    # --- RE-IMPLEMENTED: Apply prioritization sort ---
+    if is_reducing_direct_query or contains_90_deg:
+        final_results.sort(
+            key=lambda x: (
+                is_reducing_direct_query and "异径套" in x[0].Describrition,
+                contains_90_deg and "90°" in x[0].Describrition,
+                x[1]
+            ),
+            reverse=True
+        )
+    else:
+        # Original sort by score
+        final_results.sort(key=lambda x: x[1], reverse=True)
 
     if return_score:
         return final_results
     else:
         return [res[0] for res in final_results]
-
 # — Session State 初始化 —
 for k, default in [("cart",[]),("last_out",pd.DataFrame()),("to_cart",[]),("to_remove",[])]:
     if k not in st.session_state:
@@ -623,7 +637,7 @@ if page == "查询产品":
             qty = st.session_state.qty if "qty" in st.session_state else 1
             
             # 根据价格字段选择，动态决定要显示的列
-            base_cols = ["Material", "Describrition", "Describrition_English", "数量"]
+            base_cols = ["Material", "Describrition", "数量"]
             price_col = st.session_state.price_type
             show_cols = base_cols + [price_col]
 
@@ -634,7 +648,6 @@ if page == "查询产品":
                 if not filtered.empty:
                     out_df = pd.DataFrame(filtered.copy())  # 强制DataFrame
                     out_df["数量"] = qty
-                    # 不再筛选列
                     out_df = out_df[[col for col in show_cols if col in out_df.columns]]
                     st.session_state.last_out = out_df
                 else:
@@ -663,7 +676,6 @@ if page == "查询产品":
                 elif results:
                     out_df = pd.DataFrame(results)
                     out_df["数量"] = qty
-                    # 不再筛选列
                     out_df = out_df[[col for col in show_cols if col in out_df.columns]]
                     st.session_state.last_out = out_df
                 else:
@@ -680,14 +692,9 @@ if page == "查询产品":
         if st.button("🤖 AI 优选", use_container_width=True, disabled=not can_ai_select):
             with st.spinner("🤖 AI 正在分析最佳匹配..."):
                 top_3_df = st.session_state.last_out.head(3)
-                # 确保top_3_df是DataFrame类型
-                if isinstance(top_3_df, pd.DataFrame):
-                    best_choice_df, message = ai_select_best_with_gpt(
-                        st.session_state.keyword, top_3_df
-                    )
-                else:
-                    st.error("数据类型错误，无法进行AI优选")
-                    st.stop()
+                best_choice_df, message = ai_select_best_with_gpt(
+                    st.session_state.keyword, top_3_df
+                )
             
             if best_choice_df is not None:
                 # Add to cart
@@ -786,6 +793,24 @@ elif page == "批量查询":
 
 
         if st.button("🚀 开始批量查询", use_container_width=True):
+            
+            # --- START: 诊断代码 ---
+            st.info("--- 诊断信息 ---")
+            st.write(f"👉 您选择的物资名称列: **{name_col}**")
+            st.write(f"👉 您选择的规格列: **{spec_col}**")
+            
+            if not query_df.empty:
+                first_row = query_df.iloc[0]
+                first_row_name = str(first_row.get(name_col, "【读取失败】"))
+                first_row_spec = str(first_row.get(spec_col, "【读取失败】"))
+                
+                st.write(f"👉 读取到表格第一行的名称: **{first_row_name}**")
+                st.write(f"👉 读取到表格第一行的规格: **{first_row_spec}**")
+                st.write(f"👉 根据第一行生成的关键词: **{first_row_name.strip()} {first_row_spec.strip()}**")
+
+            st.info("--- 诊断结束 ---")
+            # --- END: 诊断代码 ---
+
             # 数据帧已加载，列名已选择。我们可以直接开始处理。
             products_df = load_data()
             results_log = []
@@ -795,21 +820,12 @@ elif page == "批量查询":
             
             with st.spinner("正在逐条查询并使用 AI 优选，请稍候..."):
                 for index, row in query_df.iterrows():
-                    # 确保index是整数类型
-                    current_index = int(index) if isinstance(index, (int, float)) else 0
-                    progress_text = f"正在处理: {current_index + 1}/{total_rows}"
-                    progress_bar.progress((current_index + 1) / total_rows, text=progress_text)
+                    progress_text = f"正在处理: {index + 1}/{total_rows}"
+                    progress_bar.progress((index + 1) / total_rows, text=progress_text)
                     
                     # Combine name and spec, then clean it
-                    try:
-                        name_val = str(row[name_col]) if not pd.isna(row[name_col]).item() else ""
-                    except:
-                        name_val = ""
-                    
-                    try:
-                        spec_val = str(row[spec_col]) if not pd.isna(row[spec_col]).item() else ""
-                    except:
-                        spec_val = ""
+                    name_val = str(row[name_col]) if pd.notna(row[name_col]) else ""
+                    spec_val = str(row[spec_col]) if pd.notna(row[spec_col]) else ""
                     
                     # 关键修正：直接合并，不再进行独立的标点清理。
                     # 所有的清理和解析都统一由 search_with_keywords 函数处理，以保证逻辑一致。
@@ -817,8 +833,7 @@ elif page == "批量查询":
                     
                     # Ensure quantity is a valid number, default to 1 if not
                     try:
-                        qty_value = row.get(quantity_col, 1)
-                        quantity = int(qty_value) if qty_value is not None else 1
+                        quantity = int(row.get(quantity_col, 1))
                     except (ValueError, TypeError):
                         quantity = 1
 
@@ -872,7 +887,6 @@ elif page == "批量查询":
             # Display results log
             st.subheader("批量查询结果日志")
             if results_log:
-                # 不再筛选列
                 st.dataframe(pd.DataFrame(results_log), use_container_width=True)
             
             # Rerun to update the cart display on the main page if needed,
@@ -931,7 +945,3 @@ else:
             delete_products(materials)
             load_data.clear()
             st.success("✅ 删除成功！")
-
-
-
-
