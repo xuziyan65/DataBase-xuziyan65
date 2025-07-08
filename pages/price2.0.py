@@ -90,7 +90,7 @@ st.markdown("""
 <style>
 /* 主容器卡片，最大宽度更大 */
 .block-container {
-    max-width: 1000px !important;
+    max-width: 1600px !important;
     margin: 2rem auto !important;
     background: #fff !important;
     padding: 2rem !important;
