@@ -32,7 +32,7 @@ def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
         "你是一个专业的管道建材产品采购专家。",
         "你的任务是从一个产品列表中，根据用户的搜索请求，选出最匹配的一项。",
         "**请严格遵守以下规则：**",
-        '1. 如果用户的搜索请求中包含"异径直接"，你必须优先选择描述为"异径套"的产品。如果包含90°，优先选描述为90°的产品',
+        "1. 如果用户的搜索请求中包含\"异径直接\"，你必须优先选择描述为\"异径套\"的产品。如果包含90°，优先选描述为90°的产品",
         "2. 你的回答必须只包含你选择的产品的**索引数字**，不要有任何其他文字、解释或标点符号。",
         "---",
         f"用户的搜索请求是: \"{keyword}\"",
@@ -158,6 +158,8 @@ def normalize_material(s: str) -> str:
     s = re.sub(r'[_\t]', ' ', s)
     s = s.replace('（', '(').replace('）', ')')
     s = s.replace('x', '*') # 统一尺寸分隔符
+    # --- NEW: Handle various diameter symbols ---
+    s = s.replace('ф', ' ').replace('φ', ' ').replace('ø', ' ').replace('⌀', ' ')
     s = ''.join([chr(ord(c)-65248) if 65281 <= ord(c) <= 65374 else c for c in s])
 
     # 材质归一化
@@ -195,7 +197,7 @@ def delete_products(materials: list[str]):
 # — 同义词 & 单位映射工具 —
 SYNONYM_GROUPS = [
     {"直接", "直接头", "直通"},
-    {"大小头", "异径直通", "异径套"},
+    {"大小头", "异径直通", "异径套","变径直接"},
     {"扫除口", "清扫口", "检查口"},
     {"内丝", "内螺纹"}
 ]
@@ -404,13 +406,14 @@ def split_with_synonyms(text):
 #digit_tokens: ['2', '0', '2', '5']
 #chinese_tokens: ['ppr', 'dn20*25', '20*25', '20', '25', '直接', '头']
 def classify_tokens(keyword):
+    # --- BUGFIX: Use the normalized keyword for splitting to handle special chars ---
     norm_kw = normalize_material(keyword)
     # 材质
     material_tokens = re.findall(r'pvc|ppr|pe|pp|hdpe|pb|pert', norm_kw)
     # 数字 (修正：匹配包括小数在内的完整数字)
     digit_tokens = re.findall(r'\d+(?:\.\d+)?', norm_kw)
     # 中文同义词整体切分
-    chinese_tokens = split_with_synonyms(keyword)
+    chinese_tokens = split_with_synonyms(norm_kw) # Was using keyword, now uses norm_kw
     return material_tokens, digit_tokens, chinese_tokens
 
 def expand_keyword_with_synonyms(keyword: str) -> list[str]: #分词前用
@@ -453,18 +456,8 @@ def expand_keyword_with_synonyms(keyword: str) -> list[str]: #分词前用
 
 
 def search_with_keywords(df, keyword, field, strict=True, return_score=False):
-    # --- MODIFIED: Expand keyword with synonyms before processing ---
     expanded_keywords = expand_keyword_with_synonyms(keyword.strip()) #对关键词做同义词扩展
     all_results = {} # Use dict to store unique results with the best score
-
-    # --- RE-IMPLEMENTED: Rule-based prioritization ---
-    is_reducing_direct_query = False
-    for group in SYNONYM_GROUPS:
-        if "大小头" in group and any(kw in group for kw in expanded_keywords):
-            is_reducing_direct_query = True
-            break
-    
-    contains_90_deg = "90°" in keyword or "90度" in keyword
     
     for kw in expanded_keywords:
         material_tokens, _, chinese_tokens = classify_tokens(kw) #材质相关的token和其他所有分出来的token
@@ -481,79 +474,60 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
         
         for row in df.itertuples(index=False):
-            # Use a unique identifier for each row to handle duplicates
             row_identifier = getattr(row, "Describrition", str(row)) 
             raw_text = str(getattr(row, field, ""))
-            normalized_text = normalize_material(raw_text)
+            normalized_text = normalize_material(raw_text).lower()
 
-            if not all(m in normalized_text for m in material_tokens):
+            if not all(m.lower() in normalized_text for m in material_tokens):
                 continue
+
+            # --- REWRITTEN SEARCH LOGIC ---
 
             product_all_tokens = split_with_synonyms(raw_text)
-            text_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
-            
-            if len(query_size_tokens) > len(text_specs):
-                continue
- 
+            product_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
+
+            # 1. Count size matches
+            size_hits = 0
             if query_size_tokens:
-                unmatched_text_specs = text_specs.copy()
-                all_query_specs_matched = True
-                for q_spec, q_equivalents in query_spec_equivalents.items():
-                    match_found = False
-                    for t_spec in list(unmatched_text_specs):
-                        if t_spec in q_equivalents:
-                            match_found = True
-                            unmatched_text_specs.remove(t_spec)
-                            break
-                    if not match_found:
-                        all_query_specs_matched = False
-                        break
-                
-                if not all_query_specs_matched:
-                    continue
-
-            material_keywords_in_query = {'pvc', 'ppr'}.intersection(query_text_tokens)
-            if material_keywords_in_query:
-                if not any(mat in normalized_text.lower() for mat in material_keywords_in_query):
-                    continue
-
-            hit_count = len(query_size_tokens)
+                for q_spec in query_size_tokens:
+                    q_equivalents = expand_token_with_synonyms_and_units(q_spec, material=query_material)
+                    if any(eq in product_specs for eq in q_equivalents):
+                        size_hits += 1
             
+            # In fuzzy mode, if there are size tokens in query, at least one must match
+            if not strict and query_size_tokens and size_hits == 0:
+                continue
+
+            # 2. Count text matches
+            text_hits = 0
+            product_text_lower = normalized_text
+            for token in query_text_tokens:
+                if token.lower() in product_text_lower:
+                    text_hits += 1
+
+            # 3. Apply user's rule: for fuzzy search, at least one text token must match
+            if not strict and query_text_tokens and text_hits == 0:
+                continue
+
+            # 4. Strict mode check
             if strict:
-                if not all(t in normalized_text.lower() for t in query_text_tokens):
+                # All query tokens must be matched
+                if size_hits != len(query_size_tokens) or text_hits != len(query_text_tokens):
                     continue
-                hit_count += len(query_text_tokens)
-            else:
-                product_text_lower = normalized_text.lower()
-                for token in query_text_tokens:
-                    if token in product_text_lower:
-                        hit_count += 1
-                if query_text_tokens and hit_count == len(query_size_tokens):
-                    continue
-            
+
+            # 5. Calculate score
+            hit_count = size_hits + text_hits
             total_tokens = len(query_size_tokens) + len(query_text_tokens)
-            score = hit_count / total_tokens if total_tokens > 0 else 1
-            
-            # Store or update the result if the score is higher
-            if row_identifier not in all_results or score > all_results[row_identifier][1]:
-                all_results[row_identifier] = (row, score)
+            score = hit_count / total_tokens if total_tokens > 0 else 0
+
+            if score > 0:
+                 if row_identifier not in all_results or score > all_results[row_identifier][1]:
+                    all_results[row_identifier] = (row, score)
+
 
     # Convert the results dict back to a list
     final_results = list(all_results.values())
-
-    # --- RE-IMPLEMENTED: Apply prioritization sort ---
-    if is_reducing_direct_query or contains_90_deg:
-        final_results.sort(
-            key=lambda x: (
-                is_reducing_direct_query and "异径套" in x[0].Describrition,
-                contains_90_deg and "90°" in x[0].Describrition,
-                x[1]
-            ),
-            reverse=True
-        )
-    else:
-        # Original sort by score
-        final_results.sort(key=lambda x: x[1], reverse=True)
+    final_results.sort(key=lambda x: x[1], reverse=True)
 
     if return_score:
         return final_results
