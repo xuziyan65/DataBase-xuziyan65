@@ -6,6 +6,9 @@ from sqlalchemy.pool import StaticPool
 from pathlib import Path
 from collections import Counter
 from openai import OpenAI
+from search_utils import (format_row, search_with_keywords, expand_keyword_with_synonyms, classify_tokens, expand_token_with_synonyms_and_units,
+    normalize_material, split_with_synonyms, get_synonym_words, expand_unit_tokens, get_db_engine, load_data, insert_product, delete_products,
+    ai_select_best_with_gpt)
 
 # --- 安全地从 Streamlit Secrets 获取 API KEY ---
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
@@ -118,421 +121,9 @@ h1, h2 {
 """, unsafe_allow_html=True)
 
 # — 通用设置 & 数据库连接 —
-@st.cache_resource
-def get_db_engine():
-    """
-    Creates a cached database engine for the Streamlit app.
-    Using @st.cache_resource ensures that the connection is established only once
-    per session. The StaticPool is crucial for SQLite to prevent "database is locked"
-    errors in Streamlit's multi-threaded environment by ensuring all operations
-    use the same underlying connection.
-    """
-    DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
-    engine = create_engine(
-        f"sqlite:///{DB_PATH}",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-        echo=False
-    )
-    return engine
 
 engine = get_db_engine()
 
-
-#从数据库读取产品数据，并对结果进行缓存
-@st.cache_data
-def load_data():
-    return pd.read_sql("SELECT * FROM Products", engine)
-if "show_more" not in st.session_state:
-    st.session_state.show_more = False
-    
-def is_token_in_text(token, text):
-    # 匹配完整的英寸单位
-    # 前面不是数字或斜杠，后面不是数字、斜杠或连字符
-    return re.search(rf'(?<![\d/-]){re.escape(token)}(?![\d/\\-])', text) is not None
-
-# 归一化产品描述，将常见变体统一为标准形式
-def normalize_material(s: str) -> str:
-    s = s.lower() #转成小写
-    s = s.replace('－', '-').replace('—', '-').replace('–', '-') #全角转半角
-    s = re.sub(r'[_\t]', ' ', s)
-    s = s.replace('（', '(').replace('）', ')')
-    s = s.replace('x', '*') # 统一尺寸分隔符
-    # --- NEW: Handle various diameter symbols ---
-    s = s.replace('ф', ' ').replace('φ', ' ').replace('ø', ' ').replace('⌀', ' ')
-    s = ''.join([chr(ord(c)-65248) if 65281 <= ord(c) <= 65374 else c for c in s])
-
-    # 材质归一化
-    # 只归一化ppr相关，其他材质严格区分
-    s = re.sub(r'pp[\s\-_—–]?[rｒr]', 'ppr', s)  # 归一化pp-r、pp r、pp_r、pp—r、pp–r、ppｒ为ppr
-    # 不再将pvcu、pvc-u、pvc u归一化为pvc，保持原样
-    # 只把常见分隔符替换成空格，保留*号
-    s = re.sub(r'[\|,;，；、]', ' ', s)
-    s = re.sub(r'\s+', ' ', s)
-    # 统一英寸符号
-    s = s.replace('＂', '"')
-    s = s.replace('in', '"')           # 2in -> 2"
-    s = s.replace('英寸', '"')
-    s = s.replace('寸', '"')
-    s = re.sub(r'\s*"\s*', '"', s)  # 去除英寸符号前后空格
-    # 可根据实际情况添加更多变体
-    return s.strip()
-
-# 插入新产品的函数
-def insert_product(values: dict):
-    values.pop("序号", None)
-    cols   = ", ".join(values.keys())
-    params = ", ".join(f":{k}" for k in values)
-    sql    = text(f"INSERT INTO Products ({cols}) VALUES ({params})")
-    with engine.begin() as conn:
-        conn.execute(sql, values)
-
-def delete_products(materials: list[str]):
-    if not materials:
-        return
-    with engine.begin() as conn:
-        for m in materials:
-            conn.execute(text("DELETE FROM Products WHERE Material = :m"), {"m": m})
-
-# — 同义词 & 单位映射工具 —
-SYNONYM_GROUPS = [
-    {"直接", "直接头", "直通"},
-    {"大小头", "异径直通", "异径套","变径直接"},
-    {"扫除口", "清扫口", "检查口"},
-    {"内丝", "内螺纹"}
-]
-
-# PVC管道英寸-毫米对照
-mm_to_inch_pvc = {
-    "16": '1/2"', "20": '3/4"', "25": '1"', "35": '1-1/4"', "40": '1-1/2"', "50": '2"',
-    "65": '2-1/2"', "75": '3"', "100": '4"', "125": '5"', "150": '6"', "200": '8"',
-    "250": '10"', "300": '12"'
-}
-inch_to_mm_pvc = {v: k for k, v in mm_to_inch_pvc.items()}
-
-# PPR管道英寸-毫米对照
-mm_to_inch_ppr = {
-    "20": '1/2"', "25": '3/4"', "32": '1"', "40": '1-1/4"', "50": '1-1/2"', "63": '2"',
-    "75": '2-1/2"', "90": '3"', "110": '4"', "160": '6"'
-}
-inch_to_mm_ppr = {v: k for k, v in mm_to_inch_ppr.items()}
-
-#查找某个词的同义词集合，用于后续检索时自动扩展同义词匹配。如果没有同义词，就只返回自己。
-def get_synonym_words(word):
-    for group in SYNONYM_GROUPS:
-        if word in group:
-            return group
-    return {word}
-
-# 扩展单位符号，比如dn20*20，会扩展为dn20*20、20*20、20、20*20
-def expand_unit_tokens(token, material=None):
-    eqs = {token}
-    # 选择对照表
-    if material == "pvc":
-        mm_to_inch = mm_to_inch_pvc
-        inch_to_mm = inch_to_mm_pvc
-    elif material == "ppr":
-        mm_to_inch = mm_to_inch_ppr
-        inch_to_mm = inch_to_mm_ppr
-    else:
-        mm_to_inch = {**mm_to_inch_pvc, **mm_to_inch_ppr}
-        inch_to_mm = {**inch_to_mm_pvc, **inch_to_mm_ppr}
-    
-    # Case 0: Handle composite specs like "20*1/2""，扩展为dn20*1/2"和20*1/2"
-    m = re.fullmatch(r'(?:dn)?(\d+)\*(.+)', token)
-    if m:
-        part1_mm = m.group(1)
-        part2_inch_str = m.group(2)
-        if part1_mm in mm_to_inch:
-            eqs.add(f"dn{part1_mm}*{part2_inch_str}")
-            eqs.add(f"{part1_mm}*{part2_inch_str}")
-        return eqs
-
-    # Case 1: 'dn' value, e.g., 'dn25'，扩展为dn25、3/4"、25
-    if token.startswith('dn'):
-        num = token[2:]
-        if num in mm_to_inch:
-            eqs.add(mm_to_inch[num]) # '3/4"'
-        eqs.add(num) # '25'
-        return eqs
-
-    # Case 2: An inch value, quoted or not, e.g., '3/4"' or '3/4'
-    inch_lookup_token = token
-    # Add quote if it's a fraction like "1/2", "1-1/2"
-    if re.fullmatch(r'\d+-\d+/\d+|\d+/\d+', token):
-        inch_lookup_token = token + '"' # '3/4' -> '3/4"'
-    
-    if inch_lookup_token in inch_to_mm:
-        mm_val = inch_to_mm[inch_lookup_token] # '25'
-        eqs.add(mm_val)
-        eqs.add('dn' + mm_val) # 'dn25'
-        eqs.add(inch_lookup_token) # '3/4"'
-        return eqs
-
-    # Case 3: A plain number, could be mm, e.g., '25'
-    if token.isdigit() and token in mm_to_inch:
-        eqs.add('dn' + token) # 'dn25'
-        eqs.add(mm_to_inch[token]) # '3/4"'
-        return eqs
-
-    return eqs
-
-
-#前两个函数的集合
-def expand_token_with_synonyms_and_units(token, material=None):
-    # 先查同义词组
-    synonyms = get_synonym_words(token)
-    expanded = set()
-    for syn in synonyms:
-        expanded |= expand_unit_tokens(syn, material=material)
-    return expanded
-
-# 将中文描述切分为单词列表，并自动扩展同义词和单位符号，
-# "PPR dn20*25 直接头"，['ppr', 'dn20*25', '20*25', '20', '25', '直接', '头']
-def split_with_synonyms(text):
-    # 0. 预处理：标准化各种可能造成解析问题的字符
-    text = text.replace('（', '(').replace('）', ')')
-    text = text.replace('＂', '"')  # 全角引号
-    text = text.replace('－', '-')  # 全角连字符
-
-    # 预分词：解决 "PPRDN20" 这类连写问题
-    text = re.sub(r'([A-Z])(DN)', r'\1 \2', text, flags=re.IGNORECASE)
-    text = re.sub(r'(DN)(\d)', r'\1 \2', text, flags=re.IGNORECASE)
-
-    # 移除括号，防止干扰英寸规格解析
-    text = text.replace('(', ' ').replace(')', ' ')
-
-    text = text.lower()
-    text = text.replace('*', ' * ')
-    # 统一顿号、逗号等
-    text = text.replace('、', ' ').replace('，', ' ').replace('；', ' ')
-
-    # 新增：统一数字和英寸单位的组合
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*(in|寸|英寸)', r'\1"', text)
-
-    tokens = []
-
-    # NEW: 优先提取键值对, 如 "pn=1.0", "pn:10"
-    # 这样可以正确地将键和值分开，并且能处理浮点数
-    pattern_kv = re.compile(r'([a-zA-Z]+)\s*[:=]\s*(\d+(?:\.\d+)?)')
-    for m in pattern_kv.finditer(text):
-        tokens.append(m.group(1))  # key, e.g., "pn"
-        tokens.append(m.group(2))  # value, e.g., "1.0"
-    text = pattern_kv.sub(' ', text)
-
-    # NEW: Handle mixed mm*inch specs first
-    # e.g., dn20*1/2"
-    pattern_dn_mixed = re.compile(r'dn(\d+)\*(\d+/\d+"|\d+")')
-    for m in pattern_dn_mixed.finditer(text):
-        tokens.append(m.group(0)) # dn20*1/2"
-        tokens.append(m.group(1)) # 20
-        tokens.append(m.group(2)) # 1/2"
-    text = pattern_dn_mixed.sub(' ', text)
-
-    # e.g., 20*1/2"
-    pattern_mixed = re.compile(r'(\d+)\*(\d+/\d+"|\d+")')
-    for m in pattern_mixed.finditer(text):
-        tokens.append(m.group(0)) # 20*1/2"
-        tokens.append(m.group(1)) # 20
-        tokens.append(m.group(2)) # 1/2"
-    text = pattern_mixed.sub(' ', text)
-    
-    # 新增：处理角度规格，如 90°
-    pattern_angle = re.compile(r'\d+°')
-    for m in pattern_angle.finditer(text):
-        tokens.append(m.group(0))
-    text = pattern_angle.sub(' ', text)
-
-    # 先提取 dn+数字*数字
-    pattern_dn_star = re.compile(r'dn(\d+)\*(\d+)')
-    for m in pattern_dn_star.finditer(text):
-        tokens.append(m.group())
-        tokens.append(f"{m.group(1)}*{m.group(2)}")
-        tokens.append(m.group(1))
-        tokens.append(m.group(2))
-    text = pattern_dn_star.sub(' ', text)
-    # 再提取 dn+数字
-    pattern_dn = re.compile(r'dn(\d+)')
-    for m in pattern_dn.finditer(text):
-        tokens.append(m.group())
-        tokens.append(m.group(1))
-    text = pattern_dn.sub(' ', text)
-    # 再提取 数字*数字
-    pattern_num = re.compile(r'(\d+)\*(\d+)')
-    for m in pattern_num.finditer(text):
-        tokens.append(m.group())
-        tokens.append(m.group(1))
-        tokens.append(m.group(2))
-    text = pattern_num.sub(' ', text)
-    
-    # 修正：更新英寸正则表达式以支持小数点
-    pattern_inch = re.compile(r'\d+-\d+/\d+"|\d+/\d+"|(?:\d+\.\d+|\d+)"')
-    for m in pattern_inch.finditer(text):
-        tokens.append(m.group())
-    text = pattern_inch.sub(' ', text)
-
-    # 新增: 提取不带引号的分数 (e.g. 3/4, 1-1/2)
-    pattern_fraction = re.compile(r'\d+-\d+/\d+|\d+/\d+')
-    for m in pattern_fraction.finditer(text):
-        tokens.append(m.group())
-    text = pattern_fraction.sub(' ', text)
-
-    # 再提取连续英文/拼音
-    pattern_en = re.compile(r'[a-zA-Z]+')
-    for m in pattern_en.finditer(text):
-        tokens.append(m.group())
-    text = pattern_en.sub(' ', text)
-    # 再提取单个数字 (包括小数)
-    pattern_digit = re.compile(r'\d+(?:\.\d+)?')
-    for m in pattern_digit.finditer(text):
-        tokens.append(m.group())
-    text = pattern_digit.sub(' ', text)
-    # 剩下的按单字切分
-    tokens += [c for c in text if c.strip()]
-    
-    # 去掉 'dnXX'，如果 'XX' 也在 tokens 里
-    filtered = []
-    token_set = set(tokens)
-    for t in tokens:
-        if re.fullmatch(r'dn(\d+)', t):
-            num = t[2:]
-            if num in token_set:
-                continue  # 跳过 'dnXX'
-        filtered.append(t)
-    return filtered
-
-#前三函数总和，输入："PPR dn20*25 直接头"
-#输出：material_tokens: ['ppr']
-#digit_tokens: ['2', '0', '2', '5']
-#chinese_tokens: ['ppr', 'dn20*25', '20*25', '20', '25', '直接', '头']
-def classify_tokens(keyword):
-    # --- BUGFIX: Use the normalized keyword for splitting to handle special chars ---
-    norm_kw = normalize_material(keyword)
-    # 材质
-    material_tokens = re.findall(r'pvc|ppr|pe|pp|hdpe|pb|pert', norm_kw)
-    # 数字 (修正：匹配包括小数在内的完整数字)
-    digit_tokens = re.findall(r'\d+(?:\.\d+)?', norm_kw)
-    # 中文同义词整体切分
-    chinese_tokens = split_with_synonyms(norm_kw) # Was using keyword, now uses norm_kw
-    return material_tokens, digit_tokens, chinese_tokens
-
-def expand_keyword_with_synonyms(keyword: str) -> list[str]: #分词前用
-    """
-    Expands a keyword into a list of queries with synonyms replaced.
-    This happens BEFORE tokenization.
-    Example: "直接dn20" -> ["直接dn20", "直接头dn20", "直通dn20"]
-    """
-    # Create a map from a synonym to its group for easy lookup.
-    synonym_to_group = {syn: group for group in SYNONYM_GROUPS for syn in group}
-    # Sort all available synonyms by length, descending.
-    # This ensures that longer synonyms (e.g., "异径直通") are matched before
-    # their shorter substrings (e.g., "直通").
-    sorted_synonyms = sorted(synonym_to_group.keys(), key=len, reverse=True)
-
-    # Use a set for the initial list of queries to handle duplicates.
-    queries = {keyword}
-
-    # Iterate through the sorted list of synonyms.
-    for syn in sorted_synonyms:
-        # Create a temporary list to hold newly generated queries.
-        new_queries = set()
-        for q in queries:
-            # If the synonym is found in the current query...
-            if syn in q:
-                # ...get its synonym group.
-                group = synonym_to_group[syn]
-                # And for each synonym in that group...
-                for replacement in group:
-                    # ...create a new query by replacing the original synonym.
-                    new_queries.add(q.replace(syn, replacement))
-        
-        # After checking all existing queries for a given synonym,
-        # update the main set of queries with the new variations.
-        # This prevents replacement loops and combinatorial explosion within a single pass.
-        if new_queries:
-            queries.update(new_queries)
-
-    return list(queries)
-
-
-def search_with_keywords(df, keyword, field, strict=True, return_score=False):
-    expanded_keywords = expand_keyword_with_synonyms(keyword.strip()) #对关键词做同义词扩展
-    all_results = {} # Use dict to store unique results with the best score
-    
-    for kw in expanded_keywords:
-        material_tokens, _, chinese_tokens = classify_tokens(kw) #材质相关的token和其他所有分出来的token
-
-        #包含数字的 token（规格相关，如 "dn20"、"20"、"1/2"）
-        query_size_tokens = {t for t in chinese_tokens if re.search(r'\d', t) and not t.endswith('°')}
-        #不包含数字的 token（名称、材质相关）
-        query_text_tokens = {t for t in chinese_tokens if not (re.search(r'\d', t) and not t.endswith('°'))}
-
-        # 1. 为每个查询规格，创建一个包含所有等价写法的集合
-        query_spec_equivalents = {}
-        query_material = material_tokens[0] if material_tokens else None
-        for token in query_size_tokens:
-            query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
-        
-        for row in df.itertuples(index=False):
-            row_identifier = getattr(row, "Describrition", str(row)) 
-            raw_text = str(getattr(row, field, ""))
-            normalized_text = normalize_material(raw_text).lower()
-
-            if not all(m.lower() in normalized_text for m in material_tokens):
-                continue
-
-            # --- REWRITTEN SEARCH LOGIC ---
-
-            product_all_tokens = split_with_synonyms(raw_text)
-            product_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
-
-            # 1. Count size matches
-            size_hits = 0
-            if query_size_tokens:
-                for q_spec in query_size_tokens:
-                    q_equivalents = expand_token_with_synonyms_and_units(q_spec, material=query_material)
-                    if any(eq in product_specs for eq in q_equivalents):
-                        size_hits += 1
-            
-            # In fuzzy mode, if there are size tokens in query, at least one must match
-            if not strict and query_size_tokens and size_hits == 0:
-                continue
-
-            # 2. Count text matches
-            text_hits = 0
-            product_text_lower = normalized_text
-            for token in query_text_tokens:
-                if token.lower() in product_text_lower:
-                    text_hits += 1
-
-            # 3. Apply user's rule: for fuzzy search, at least one text token must match
-            if not strict and query_text_tokens and text_hits == 0:
-                continue
-
-            # 4. Strict mode check
-            if strict:
-                # All query tokens must be matched
-                if size_hits != len(query_size_tokens) or text_hits != len(query_text_tokens):
-                    continue
-
-            # 5. Calculate score
-            hit_count = size_hits + text_hits
-            total_tokens = len(query_size_tokens) + len(query_text_tokens)
-            score = hit_count / total_tokens if total_tokens > 0 else 0
-
-            if score > 0:
-                 if row_identifier not in all_results or score > all_results[row_identifier][1]:
-                    all_results[row_identifier] = (row, score)
-
-
-    # Convert the results dict back to a list
-    final_results = list(all_results.values())
-    final_results.sort(key=lambda x: x[1], reverse=True)
-
-    if return_score:
-        return final_results
-    else:
-        return [res[0] for res in final_results]
 # — Session State 初始化 —
 for k, default in [("cart",[]),("last_out",pd.DataFrame()),("to_cart",[]),("to_remove",[])]:
     if k not in st.session_state:
@@ -611,7 +202,7 @@ if page == "查询产品":
             qty = st.session_state.qty if "qty" in st.session_state else 1
             
             # 根据价格字段选择，动态决定要显示的列
-            base_cols = ["Material", "Describrition", "数量"]
+            base_cols = ["Material", "Describrition", "Describrition_English", "数量"]
             price_col = st.session_state.price_type
             show_cols = base_cols + [price_col]
 
@@ -666,9 +257,12 @@ if page == "查询产品":
         if st.button("🤖 AI 优选", use_container_width=True, disabled=not can_ai_select):
             with st.spinner("🤖 AI 正在分析最佳匹配..."):
                 top_3_df = st.session_state.last_out.head(3)
-                best_choice_df, message = ai_select_best_with_gpt(
-                    st.session_state.keyword, top_3_df
-                )
+                if isinstance(top_3_df, pd.DataFrame):
+                    best_choice_df, message = ai_select_best_with_gpt(
+                        st.session_state.keyword, top_3_df
+                    )
+                else:
+                    best_choice_df, message = None, "数据类型错误"
             
             if best_choice_df is not None:
                 # Add to cart
@@ -684,23 +278,10 @@ if page == "查询产品":
     out_df = st.session_state.get("last_out", pd.DataFrame())
     if not out_df.empty and isinstance(out_df, pd.DataFrame):
         st.dataframe(out_df, use_container_width=True)
-        def format_row(i):
-            try:
-                row = out_df.loc[i]
-                if "产品描述" in out_df.columns:
-                    return row["产品描述"]
-                elif "Describrition" in out_df.columns:
-                    return row["Describrition"]
-                elif "Material" in out_df.columns:
-                    return str(row["Material"])
-                else:
-                    return str(i)
-            except Exception:
-                return str(i)
         to_cart = st.multiselect(
             "选择要加入购物车的行",
             options=list(out_df.index),
-            format_func=format_row,
+            format_func=lambda i: format_row(i, out_df),
             key="to_cart"
         )
         if st.button("添加到购物车", key="add_cart"):
@@ -794,21 +375,28 @@ elif page == "批量查询":
             
             with st.spinner("正在逐条查询并使用 AI 优选，请稍候..."):
                 for index, row in query_df.iterrows():
-                    progress_text = f"正在处理: {index + 1}/{total_rows}"
-                    progress_bar.progress((index + 1) / total_rows, text=progress_text)
+                    progress_text = f"正在处理: {int(str(index)) + 1}/{total_rows}"
+                    progress_bar.progress((int(str(index)) + 1) / total_rows, text=progress_text)
                     
                     # Combine name and spec, then clean it
-                    name_val = str(row[name_col]) if pd.notna(row[name_col]) else ""
-                    spec_val = str(row[spec_col]) if pd.notna(row[spec_col]) else ""
+                    try:
+                        name_val = str(row[name_col]) if pd.notna(row[name_col]) else ""
+                    except Exception:
+                        name_val = ""
+                    try:
+                        spec_val = str(row[spec_col]) if pd.notna(row[spec_col]) else ""
+                    except Exception:
+                        spec_val = ""
                     
                     # 关键修正：直接合并，不再进行独立的标点清理。
                     # 所有的清理和解析都统一由 search_with_keywords 函数处理，以保证逻辑一致。
                     keyword = f"{name_val} {spec_val}".strip()
                     
                     # Ensure quantity is a valid number, default to 1 if not
+                    val = row.get(quantity_col, 1)
                     try:
-                        quantity = int(row.get(quantity_col, 1))
-                    except (ValueError, TypeError):
+                        quantity = int(val) if val is not None and val != "" else 1
+                    except Exception:
                         quantity = 1
 
 
@@ -821,7 +409,11 @@ elif page == "批量查询":
                     if strict_results:
                         candidates_df = pd.DataFrame(strict_results)
                         # Use AI to select from strict results (take top 5 to be safe with token limits)
-                        best_choice_df, message = ai_select_best_with_gpt(keyword, candidates_df.head(5))
+                        top_3_df = candidates_df.head(5)
+                        if isinstance(top_3_df, pd.DataFrame):
+                            best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
+                        else:
+                            best_choice_df, message = None, "数据类型错误"
                         if message == "Success" and best_choice_df is not None and not best_choice_df.empty:
                             status = "✅ AI从严格匹配结果中选择"
                     
@@ -834,7 +426,11 @@ elif page == "批量查询":
                             fuzzy_df = fuzzy_df.sort_values("匹配度", ascending=False)
                             
                             # Use AI to select from top 3 fuzzy results
-                            best_choice_df, message = ai_select_best_with_gpt(keyword, fuzzy_df.head(3))
+                            top_3_df = fuzzy_df.head(3)
+                            if isinstance(top_3_df, pd.DataFrame):
+                                best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
+                            else:
+                                best_choice_df, message = None, "数据类型错误"
                             if message == "Success" and best_choice_df is not None and not best_choice_df.empty:
                                 status = "🟡 AI从模糊匹配结果中选择"
 
