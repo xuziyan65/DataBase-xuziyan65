@@ -12,12 +12,14 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 
 # — 同义词 & 单位映射工具 —
 SYNONYM_GROUPS = [
-    {"直接", "直接头", "直通"},
-    {"大小头", "异径直通", "异径套","变径直接","异径直接"},
+    {"直接", "直接头", "直通","直通接头"},
+    {"大小头", "异径直通", "异径套","变径直接","异径直接","异径直通接头"},
     {"扫除口", "清扫口", "检查口","立管检查口"},
     {"内丝", "内螺纹"},
     {"锁母","锁扣","锁母锁扣","管接头"},
-    {"线管直接","管直通"}
+    {"线管直接","管直通"},
+    {"止回阀","截止阀"},
+    {"穿线管","电线管"}
 ]
 
 # PVC管道英寸-毫米对照
@@ -146,8 +148,9 @@ def normalize_material(s: str) -> str:
     s = re.sub(r'[\|,;，；、]', ' ', s)
     s = re.sub(r'\s+', ' ', s)
     # 统一英寸符号
-    s = s.replace('＂', '"')
-    s = s.replace('in', '"')           # 2in -> 2"
+    s = s.replace('“', '"').replace('”', '"')  # 处理中文书名号
+    s = s.replace('＂', '"')                   # 全角引号
+    s = s.replace('in', '"')                   # in → "
     s = s.replace('英寸', '"')
     s = s.replace('寸', '"')
     s = re.sub(r'\s*"\s*', '"', s)  # 去除英寸符号前后空格
@@ -180,6 +183,14 @@ def get_synonym_words(word):
 # 扩展单位符号，比如dn20*20，会扩展为dn20*20、20*20、20、20*20
 def expand_unit_tokens(token, material=None):
     eqs = {token}
+    # 新增：处理1.2"和1.5"的特殊映射
+    special_inch_map = {
+        '1.2"': '1-1/4"',
+        '1.5"': '1-1/2"',
+    }
+    if token in special_inch_map:
+        eqs.add(special_inch_map[token])
+        return eqs
     # 选择对照表
     if material == "pvc":
         mm_to_inch = mm_to_inch_pvc
@@ -408,6 +419,8 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
     expanded_keywords = expand_keyword_with_synonyms(keyword.strip()) #对关键词做同义词扩展
     all_results = {} # Use dict to store unique results with the best score
     
+    # 新增：定义异径相关词
+    yijing_words = {"异径"}
     for kw in expanded_keywords:
         material_tokens, _, chinese_tokens = classify_tokens(kw) #材质相关的token和其他所有分出来的token
 
@@ -415,6 +428,9 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
         query_size_tokens = {t for t in chinese_tokens if re.search(r'\d', t) and not t.endswith('°')}
         #不包含数字的 token（名称、材质相关）
         query_text_tokens = {t for t in chinese_tokens if not (re.search(r'\d', t) and not t.endswith('°'))}
+
+        # 判断用户输入是否包含异径相关词
+        is_query_yijing = any(word in kw for word in yijing_words)
 
         # 1. 为每个查询规格，创建一个包含所有等价写法的集合
         query_spec_equivalents = {}
@@ -426,6 +442,13 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             row_identifier = getattr(row, "Describrition", str(row)) 
             raw_text = str(getattr(row, field, ""))
             normalized_text = normalize_material(raw_text).lower()
+
+            # 新增：判断产品描述是否包含异径相关词
+            is_row_yijing = any(word in normalized_text for word in yijing_words)
+
+            # --- 新增严格模式下的等径优先逻辑 ---
+            if strict and not is_query_yijing and is_row_yijing:
+                continue  # 用户没查异径，但产品是异径，跳过
 
             if not all(m.lower() in normalized_text for m in material_tokens):
                 continue

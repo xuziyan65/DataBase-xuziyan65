@@ -348,6 +348,7 @@ elif page == "批量查询":
 
 
         if st.button("🚀 开始批量查询", use_container_width=True):
+            st.session_state.cart = []  # 这行是关键
             
             # --- START: 诊断代码 ---
             st.info("--- 诊断信息 ---")
@@ -445,6 +446,15 @@ elif page == "批量查询":
                             "状态": status
                         })
                     else:
+                        # 构造一个“未找到”占位字典，字段与购物车其它条目一致
+                        not_found_item = {
+                            "Material": "无",
+                            "Describrition": f"未找到：{keyword}",
+                            "Describrition_English": "",
+                            "数量": quantity,
+                            # 你可以根据实际表结构补充其它字段
+                        }
+                        st.session_state.cart.append(not_found_item)
                         results_log.append({
                             "查询关键词": keyword,
                             "匹配结果": "---",
