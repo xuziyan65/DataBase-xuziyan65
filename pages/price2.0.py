@@ -9,6 +9,7 @@ from openai import OpenAI
 from search_utils import (format_row, search_with_keywords, expand_keyword_with_synonyms, classify_tokens, expand_token_with_synonyms_and_units,
     normalize_material, split_with_synonyms, get_synonym_words, expand_unit_tokens, get_db_engine, load_data, insert_product, delete_products,
     ai_select_best_with_gpt)
+import hashlib
 
 # --- 安全地从 Streamlit Secrets 获取 API KEY ---
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
@@ -319,19 +320,25 @@ elif page == "批量查询":
     )
 
     if uploaded_file is not None:
-        # 为了避免在每次交互时都重新读取文件，我们将其存储在会话状态中
-        # 并检查上传的文件是否是新的
-        if 'query_df' not in st.session_state or st.session_state.get('uploaded_filename') != uploaded_file.name:
+        file_bytes = uploaded_file.getvalue()
+        file_hash = hashlib.md5(file_bytes).hexdigest()
+        # 只要内容变了就重新读取
+        if (
+            'query_df' not in st.session_state
+            or st.session_state.get('uploaded_file_hash') != file_hash
+        ):
             try:
                 if uploaded_file.name.endswith('.csv'):
-                    st.session_state.query_df = pd.read_csv(uploaded_file)
+                    from io import StringIO
+                    st.session_state.query_df = pd.read_csv(StringIO(file_bytes.decode('utf-8')))
                 else:
-                    st.session_state.query_df = pd.read_excel(uploaded_file)
+                    from io import BytesIO
+                    st.session_state.query_df = pd.read_excel(BytesIO(file_bytes))
                 st.session_state.uploaded_filename = uploaded_file.name
+                st.session_state.uploaded_file_hash = file_hash
             except Exception as e:
                 st.error(f"读取文件时出错: {e}")
                 st.stop()
-
         query_df = st.session_state.query_df
         file_columns = query_df.columns.tolist()
 
@@ -477,6 +484,27 @@ elif page == "批量查询":
 
 elif page == "添加产品":
     st.header(" 添加新产品到数据库")
+
+    # 1. 登录状态标志
+    if "add_product_logged_in" not in st.session_state:
+        st.session_state.add_product_logged_in = False
+
+    # 2. 如果未登录，显示登录表单
+    if not st.session_state.add_product_logged_in:
+        with st.form("add_product_login_form"):
+            username = st.text_input("账户", key="add_product_username")
+            password = st.text_input("密码", type="password", key="add_product_password")
+            login_submitted = st.form_submit_button("登录")
+        if login_submitted:
+            # 这里用你自己的用户名和密码校验逻辑
+            if username == "vantsing" and password == "vantsing2020":  # 替换为你的账号密码
+                st.session_state.add_product_logged_in = True
+                st.success("登录成功！")
+                st.rerun()
+            else:
+                st.error("账户或密码错误，请重试。")
+        st.stop()  # 阻止后续内容渲染
+    # 3. 已登录，显示原有添加产品表单
     df0 = load_data()
     cols = df0.columns.tolist()
 
@@ -512,6 +540,26 @@ elif page == "添加产品":
 
 else:
     st.header("🗑️ 删除产品")
+
+    # 1. 登录状态标志
+    if "add_product_logged_in" not in st.session_state:
+        st.session_state.add_product_logged_in = False
+
+    # 2. 如果未登录，显示登录表单
+    if not st.session_state.add_product_logged_in:
+        with st.form("delete_product_login_form"):
+            username = st.text_input("账户", key="delete_product_username")
+            password = st.text_input("密码", type="password", key="delete_product_password")
+            login_submitted = st.form_submit_button("登录")
+        if login_submitted:
+            if username == "vantsing" and password == "vantsing2020":  # 替换为你的账号密码
+                st.session_state.add_product_logged_in = True
+                st.success("登录成功！")
+                st.rerun()
+            else:
+                st.error("账户或密码错误，请重试。")
+        st.stop()  # 阻止后续内容渲染
+    # 3. 已登录，显示原有删除产品界面
     df = load_data()
     if df.empty:
         st.info("当前无产品可删除。")

@@ -13,6 +13,7 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 # — 同义词 & 单位映射工具 —
 SYNONYM_GROUPS = [
     {"直接", "直接头", "直通","直通接头"},
+    {"变径","异径"},
     {"大小头", "异径直通", "异径套","变径直接","异径直接","异径直通接头"},
     {"扫除口", "清扫口", "检查口","立管检查口"},
     {"内丝", "内螺纹"},
@@ -420,7 +421,7 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
     all_results = {} # Use dict to store unique results with the best score
     
     # 新增：定义异径相关词
-    yijing_words = {"异径"}
+    yijing_words = {"异径","变径"}
     for kw in expanded_keywords:
         material_tokens, _, chinese_tokens = classify_tokens(kw) #材质相关的token和其他所有分出来的token
 
@@ -446,8 +447,8 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             # 新增：判断产品描述是否包含异径相关词
             is_row_yijing = any(word in normalized_text for word in yijing_words)
 
-            # --- 新增严格模式下的等径优先逻辑 ---
-            if strict and not is_query_yijing and is_row_yijing:
+            # --- 新增等径优先逻辑（无论严格或模糊） ---
+            if not is_query_yijing and is_row_yijing:
                 continue  # 用户没查异径，但产品是异径，跳过
 
             if not all(m.lower() in normalized_text for m in material_tokens):
@@ -456,14 +457,25 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             # --- REWRITTEN SEARCH LOGIC ---
 
             product_all_tokens = split_with_synonyms(raw_text)
-            product_specs = {t for t in product_all_tokens if re.search(r'\d', t)}
+            product_material_tokens = re.findall(r'pvc|ppr|pe|pp|hdpe|pb|pert', normalized_text)
+            product_material = product_material_tokens[0] if product_material_tokens else None
+            product_specs_tokens = {t for t in product_all_tokens if re.search(r'\d', t)}
+            # 规格标准化集合
+            canonical_product_specs = {
+                next((eq for eq in expand_token_with_synonyms_and_units(t, product_material) if eq.startswith('dn')), t)
+                for t in product_specs_tokens
+            }
+            canonical_query_specs = {
+                next((eq for eq in expand_token_with_synonyms_and_units(t, query_material) if eq.startswith('dn')), t)
+                for t in query_size_tokens
+            }
 
             # 1. Count size matches
             size_hits = 0
             if query_size_tokens:
                 for q_spec in query_size_tokens:
                     q_equivalents = expand_token_with_synonyms_and_units(q_spec, material=query_material)
-                    if any(eq in product_specs for eq in q_equivalents):
+                    if any(eq in product_specs_tokens for eq in q_equivalents):
                         size_hits += 1
             
             # In fuzzy mode, if there are size tokens in query, at least one must match
@@ -490,6 +502,11 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             # 5. Calculate score
             hit_count = size_hits + text_hits
             total_tokens = len(query_size_tokens) + len(query_text_tokens)
+
+            # 新增：如果规格标准化集合完全一致，hit_count加1
+            if canonical_query_specs == canonical_product_specs and canonical_query_specs:
+                hit_count += 1
+
             score = hit_count / total_tokens if total_tokens > 0 else 0
 
             if score > 0:
