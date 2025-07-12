@@ -15,12 +15,15 @@ SYNONYM_GROUPS = [
     {"直接", "直接头", "直通","直通接头"},
     {"变径","异径"},
     {"大小头", "异径直通", "异径套","变径直接","异径直接","异径直通接头"},
+    {"PN10", "1.0MPa"},
+    {"PN16", "1.6MPa"},
     {"扫除口", "清扫口", "检查口","立管检查口"},
     {"内丝", "内螺纹"},
     {"锁母","锁扣","锁母锁扣","管接头"},
     {"线管直接","管直通"},
     {"止回阀","截止阀"},
-    {"穿线管","电线管"}
+    {"穿线管","电线管"},
+    {"承插","承插式","对接"}
 ]
 
 # PVC管道英寸-毫米对照
@@ -502,6 +505,30 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             # 5. Calculate score
             hit_count = size_hits + text_hits
             total_tokens = len(query_size_tokens) + len(query_text_tokens)
+
+            # 新增：承插/对接类优先1.0MPa/PN10，hit_count加1
+            chicai_words = {"承插", "承插式", "对接"}
+            is_query_chicai = any(word in kw for word in chicai_words)
+            is_row_1mpa = ("1.0mpa" in normalized_text or "pn10" in normalized_text)
+            if is_query_chicai and is_row_1mpa:
+                hit_count += 1
+
+            # 新增：电熔类优先1.6MPa/PN16，hit_count加1
+            dianrong_words = {"电熔"}
+            is_query_dianrong = any(word in kw for word in dianrong_words)
+            is_row_16mpa = ("1.6mpa" in normalized_text or "pn16" in normalized_text)
+            if is_query_dianrong and is_row_16mpa:
+                hit_count += 1
+
+            # 新增：HDPE直管优先1.0MPa/PN10且6M，hit_count加1
+            hdpe_words = {"hdpe"}
+            zhiguan_words = {"直管"}
+            is_query_hdpe = any(word in kw.lower() for word in hdpe_words)
+            is_query_zhiguan = any(word in kw for word in zhiguan_words)
+            is_row_1mpa = ("1.0mpa" in normalized_text or "pn10" in normalized_text)
+            is_row_6m = ("6m" in normalized_text)
+            if is_query_hdpe and is_query_zhiguan and is_row_1mpa and is_row_6m:
+                hit_count += 1
 
             # 新增：如果规格标准化集合完全一致，hit_count加1
             if canonical_query_specs == canonical_product_specs and canonical_query_specs:
