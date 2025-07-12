@@ -521,8 +521,8 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
                 hit_count += 1
 
             # 新增：HDPE直管优先1.0MPa/PN10且6M，hit_count加1
-            hdpe_words = {"hdpe"}
-            zhiguan_words = {"直管"}
+            hdpe_words = {"pe"}
+            zhiguan_words = {"管"}
             is_query_hdpe = any(word in kw.lower() for word in hdpe_words)
             is_query_zhiguan = any(word in kw for word in zhiguan_words)
             is_row_1mpa = ("1.0mpa" in normalized_text or "pn10" in normalized_text)
