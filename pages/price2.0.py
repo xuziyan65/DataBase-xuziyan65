@@ -11,78 +11,6 @@ from search_utils import (format_row, search_with_keywords, expand_keyword_with_
     ai_select_best_with_gpt)
 import hashlib
 
-# --- 安全地从 Streamlit Secrets 获取 API KEY ---
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-
-#OpenAI的GPT-4o-mini模型帮用户从多个候选产品中选出最匹配的一个
-# --- AI 选择功能 (GPT-4o-mini) ---
-def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
-    """
-    Uses GPT-4o-mini to select the best match from a DataFrame of candidates.
-    """
-    if not OPENAI_API_KEY:
-        return None, "错误：请在 Streamlit Cloud 的 Secrets 中设置您的 OpenAI API Key。"
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    #把所有候选产品的描述拼成一段文本，带上索引号
-    choices_str = ""
-    # Use a fresh, reset index for this operation to guarantee alignment
-    df_reset = df.reset_index(drop=True)
-    for i, row in df_reset.iterrows():
-        choices_str += f"索引 {i}: {row['Describrition']}\n" # 使用真实的换行符
-
-    prompt_lines = [
-        "你是一个专业的管道建材产品采购专家。",
-        "你的任务是从一个产品列表中，根据用户的搜索请求，选出最匹配的一项。",
-        "**请严格遵守以下规则：**",
-        "1. 如果用户的搜索请求中包含\"异径直接\"，你必须优先选择描述为\"异径套\"的产品。如果包含90°，优先选描述为90°的产品",
-        "2. 你的回答必须只包含你选择的产品的**索引数字**，不要有任何其他文字、解释或标点符号。",
-        "---",
-        f"用户的搜索请求是: \"{keyword}\"",
-        f"以下是候选产品列表 (共{len(df_reset)}个):",
-        choices_str,
-        "---",
-        "请根据以上规则和用户请求，从列表中选出最匹配的**唯一一个**产品，并仅返回其索引号。"
-    ]
-    prompt = "\n".join(prompt_lines)
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "你是一个专业的管道建材产品采购专家。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0,
-            max_tokens=10, # Only need a number
-            timeout=20,
-        )
-        
-        content = response.choices[0].message.content
-        if content is None:
-            raise ValueError("AI返回了空内容")
-        content = content.strip() #取出AI回复的数字，去掉首尾空格
-        
-        if not content.isdigit():
-             raise ValueError(f"AI未能返回有效的索引数字。原始回复: '{content}'")
-
-        selected_index = int(content)
-
-        if selected_index < 0 or selected_index >= len(df_reset):
-             raise ValueError(f"AI返回了越界的索引: {selected_index}。")
-
-        # Return the single selected row (using the correct index)
-        best_row_df = df_reset.iloc[[selected_index]]
-        return best_row_df, "Success"
-
-    except Exception as e:
-        error_message = str(e)
-        if "Incorrect API key" in error_message:
-            return None, "AI调用失败：API Key不正确或已失效。请检查 Streamlit Cloud 中的配置。"
-        return None, f"AI调用失败：{error_message}"
-# --- 结束 AI 功能 ---
-
 # — 页面配置：宽屏布局、标题 —
 st.set_page_config(
     page_title="产品报价系统",
@@ -278,6 +206,9 @@ if page == "查询产品":
     # 查询结果展示和购物车操作（无论是否刚点了查询按钮，只要有结果都显示）
     out_df = st.session_state.get("last_out", pd.DataFrame())
     if not out_df.empty and isinstance(out_df, pd.DataFrame):
+        # 联塑优先排序
+        from search_utils import prioritize_liansu
+        out_df = prioritize_liansu(out_df)
         st.dataframe(out_df, use_container_width=True)
         to_cart = st.multiselect(
             "选择要加入购物车的行",
@@ -402,11 +333,7 @@ elif page == "批量查询":
                     
                     # 检查是否需要人工核查
                     check_msg = ""
-                    if "给水管" in name_val:
-                        check_msg = "该产品为给水管，需要二次人工核查"
-                    elif "排水管" in name_val:
-                        check_msg = "该产品为排水管，需要二次人工核查"
-                    
+
                     # Ensure quantity is a valid number, default to 1 if not
                     val = row.get(quantity_col, 1)
                     try:
@@ -453,8 +380,10 @@ elif page == "批量查询":
                     if best_choice_df is not None and not best_choice_df.empty:
                         selected_item = best_choice_df.iloc[0].to_dict()
                         selected_item['数量'] = quantity
-                        if check_msg:
-                            selected_item['人工核查提示'] = check_msg
+                        # 新增：AW给水或D排水人工核查提示
+                        descr = selected_item.get('Describrition', '')
+                        if ("AW给水" in descr) or ("D排水" in descr):
+                            selected_item['人工核查提示'] = "该产品为AW给水或D排水，需要二次人工核查"
                         st.session_state.cart.append(selected_item)
                         results_log.append({
                             "查询关键词": keyword,

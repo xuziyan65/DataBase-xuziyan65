@@ -81,8 +81,9 @@ def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
         "你的任务是从一个产品列表中，根据用户的搜索请求，选出最匹配的一项。",
         "**请严格遵守以下规则：**",
         "1. 如果用户的搜索请求中包含\"异径直接\"，你必须优先选择描述为\"异径套\"的产品。如果包含90°，优先选描述为90°的产品",
-        "2. 如果用户的搜索请求中包含“PVC给水管”，你必须优先选择描述为“印尼(日标)PVC-U给水扩直口管”的产品。",
-        "3. 你的回答必须只包含你选择的产品的**索引数字**，不要有任何其他文字、解释或标点符号。",
+        "2. 如果用户的搜索请求中包含“PVC排水管”，你必须优先选择描述为“印尼(日标)PVC-U排水扩直口管”的产品。",
+        "3. 如果用户的搜索请求中包含“PVC给水管”，你必须优先选择描述为“印尼(日标)PVC-U给水扩直口管”的产品。",
+        "4. 你的回答必须只包含你选择的产品的**索引数字**，不要有任何其他文字、解释或标点符号。",
         "---",
         f"用户的搜索请求是: \"{keyword}\"",
         f"以下是候选产品列表 (共{len(df_reset)}个):",
@@ -140,6 +141,8 @@ def normalize_material(s: str) -> str:
     s = re.sub(r'[_\t]', ' ', s)
     s = s.replace('（', '(').replace('）', ')')
     s = s.replace('x', '*') # 统一尺寸分隔符
+    # 新增：将“90度”替换为“90°”
+    s = s.replace('90度', '90°')
     # --- NEW: Handle various diameter symbols ---
     s = s.replace('ф', ' ').replace('φ', ' ').replace('ø', ' ').replace('⌀', ' ')
     s = ''.join([chr(ord(c)-65248) if 65281 <= ord(c) <= 65374 else c for c in s])
@@ -196,15 +199,16 @@ def expand_unit_tokens(token, material=None):
         eqs.add(special_inch_map[token])
         return eqs
     # 选择对照表
-    if material == "pvc":
+    if material and material.startswith("pvc"):
         mm_to_inch = mm_to_inch_pvc
         inch_to_mm = inch_to_mm_pvc
     elif material == "ppr":
         mm_to_inch = mm_to_inch_ppr
         inch_to_mm = inch_to_mm_ppr
     else:
-        mm_to_inch = {**mm_to_inch_pvc, **mm_to_inch_ppr}
-        inch_to_mm = {**inch_to_mm_pvc, **inch_to_mm_ppr}
+        # 默认用pvc
+        mm_to_inch = mm_to_inch_pvc
+        inch_to_mm = inch_to_mm_pvc
     
     # Case 0: Handle composite specs like "20*1/2""，扩展为dn20*1/2"和20*1/2"
     m = re.fullmatch(r'(?:dn)?(\d+)\*(.+)', token)
@@ -441,7 +445,7 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
         query_material = material_tokens[0] if material_tokens else None
         for token in query_size_tokens:
             query_spec_equivalents[token] = expand_token_with_synonyms_and_units(token, material=query_material)
-        
+
         for row in df.itertuples(index=False):
             row_identifier = getattr(row, "Describrition", str(row)) 
             raw_text = str(getattr(row, field, ""))
@@ -540,7 +544,6 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
                  if row_identifier not in all_results or score > all_results[row_identifier][1]:
                     all_results[row_identifier] = (row, score)
 
-
     # Convert the results dict back to a list
     final_results = list(all_results.values())
     final_results.sort(key=lambda x: x[1], reverse=True)
@@ -549,6 +552,13 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
         return final_results
     else:
         return [res[0] for res in final_results]
+
+def prioritize_liansu(df):
+    # 新增一列，联塑为1，其它为0
+    df['_liansu_priority'] = df['Describrition'].str.contains('联塑').astype(int)
+    # 联塑优先，其它次之，原顺序不变
+    df = df.sort_values('_liansu_priority', ascending=False).drop('_liansu_priority', axis=1)
+    return df
 
 def format_row(i, out_df):
     try:
