@@ -400,6 +400,13 @@ elif page == "批量查询":
                     # 所有的清理和解析都统一由 search_with_keywords 函数处理，以保证逻辑一致。
                     keyword = f"{name_val} {spec_val}".strip()
                     
+                    # 检查是否需要人工核查
+                    check_msg = ""
+                    if "给水管" in name_val:
+                        check_msg = "该产品为给水管，需要二次人工核查"
+                    elif "排水管" in name_val:
+                        check_msg = "该产品为排水管，需要二次人工核查"
+                    
                     # Ensure quantity is a valid number, default to 1 if not
                     val = row.get(quantity_col, 1)
                     try:
@@ -446,6 +453,8 @@ elif page == "批量查询":
                     if best_choice_df is not None and not best_choice_df.empty:
                         selected_item = best_choice_df.iloc[0].to_dict()
                         selected_item['数量'] = quantity
+                        if check_msg:
+                            selected_item['人工核查提示'] = check_msg
                         st.session_state.cart.append(selected_item)
                         results_log.append({
                             "查询关键词": keyword,
@@ -458,9 +467,11 @@ elif page == "批量查询":
                             "Material": "无",
                             "Describrition": f"未找到：{keyword}",
                             "Describrition_English": "",
-                            "数量": quantity,
+                            "数量": quantity
                             # 你可以根据实际表结构补充其它字段
                         }
+                        if check_msg:
+                            not_found_item['人工核查提示'] = check_msg
                         st.session_state.cart.append(not_found_item)
                         results_log.append({
                             "查询关键词": keyword,
@@ -480,7 +491,13 @@ elif page == "批量查询":
             # but showing it here might be better ux
             if st.session_state.cart:
                 st.subheader("🛒 当前购物车")
-                st.dataframe(pd.DataFrame(st.session_state.cart), use_container_width=True)
+                cart_df = pd.DataFrame(st.session_state.cart)
+                show_cols = [
+                    "序号","Material","Describrition","Describrition_English", "出厂价_含税","出厂价_不含税","匹配度","人工核查提示"
+                ]
+                # 只保留存在于cart_df中的列
+                show_cols = [col for col in show_cols if col in cart_df.columns]
+                st.dataframe(cart_df[show_cols], use_container_width=True)
 
 elif page == "添加产品":
     st.header(" 添加新产品到数据库")
