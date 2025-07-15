@@ -81,8 +81,8 @@ def ai_select_best_with_gpt(keyword: str, df: pd.DataFrame):
         "你的任务是从一个产品列表中，根据用户的搜索请求，选出最匹配的一项。",
         "**请严格遵守以下规则：**",
         "1. 如果用户的搜索请求中包含\"异径直接\"，你必须优先选择描述为\"异径套\"的产品。如果包含90°，优先选描述为90°的产品",
-        "2. 如果用户的搜索请求中包含“PVC排水管”，你必须优先选择描述为“印尼(日标)PVC-U排水扩直口管”的产品。",
-        "3. 如果用户的搜索请求中包含“PVC给水管”，你必须优先选择描述为“印尼(日标)PVC-U给水扩直口管”的产品。",
+        "2. 如果用户的搜索请求中包含“PVC排水管”，你必须优先选择描述为“扩直口管”的产品，而不是“直通”或“管件”。",
+        "3. 如果用户的搜索请求中包含“PVC给水管”，你必须优先选择描述为“印尼(日标)PVC-U给水扩直口管”的产品，而不是“直通”或“管件”。",
         "4. 你的回答必须只包含你选择的产品的**索引数字**，不要有任何其他文字、解释或标点符号。",
         "---",
         f"用户的搜索请求是: \"{keyword}\"",
@@ -428,7 +428,7 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
     all_results = {} # Use dict to store unique results with the best score
     
     # 新增：定义异径相关词
-    yijing_words = {"异径","变径"}
+    special_words = {"异径","变径","内丝","内螺纹"}
     for kw in expanded_keywords:
         material_tokens, _, chinese_tokens = classify_tokens(kw) #材质相关的token和其他所有分出来的token
 
@@ -438,7 +438,7 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
         query_text_tokens = {t for t in chinese_tokens if not (re.search(r'\d', t) and not t.endswith('°'))}
 
         # 判断用户输入是否包含异径相关词
-        is_query_yijing = any(word in kw for word in yijing_words)
+        is_query_special_words = any(word in kw for word in special_words)
 
         # 1. 为每个查询规格，创建一个包含所有等价写法的集合
         query_spec_equivalents = {}
@@ -452,10 +452,10 @@ def search_with_keywords(df, keyword, field, strict=True, return_score=False):
             normalized_text = normalize_material(raw_text).lower()
 
             # 新增：判断产品描述是否包含异径相关词
-            is_row_yijing = any(word in normalized_text for word in yijing_words)
+            is_row_yijing = any(word in normalized_text for word in special_words)
 
             # --- 新增等径优先逻辑（无论严格或模糊） ---
-            if not is_query_yijing and is_row_yijing:
+            if not is_query_special_words and is_row_yijing:
                 continue  # 用户没查异径，但产品是异径，跳过
 
             if not all(m.lower() in normalized_text for m in material_tokens):

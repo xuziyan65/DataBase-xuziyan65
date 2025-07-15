@@ -356,9 +356,9 @@ elif page == "批量查询":
                     if strict_results:
                         candidates_df = pd.DataFrame(strict_results)
                         # Use AI to select from strict results (take top 5 to be safe with token limits)
-                        top_3_df = candidates_df.head(3)
-                        if isinstance(top_3_df, pd.DataFrame):
-                            best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
+                        top_5_df = candidates_df.head(5)
+                        if isinstance(top_5_df, pd.DataFrame):
+                            best_choice_df, message = ai_select_best_with_gpt(keyword, top_5_df)
                         else:
                             best_choice_df, message = None, "数据类型错误"
                         if message == "Success" and best_choice_df is not None and not best_choice_df.empty:
@@ -373,9 +373,9 @@ elif page == "批量查询":
                             fuzzy_df = fuzzy_df.sort_values("匹配度", ascending=False)
                             
                             # Use AI to select from top 3 fuzzy results
-                            top_3_df = fuzzy_df.head(3)
-                            if isinstance(top_3_df, pd.DataFrame):
-                                best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
+                            top_5_df = fuzzy_df.head(5)
+                            if isinstance(top_5_df, pd.DataFrame):
+                                best_choice_df, message = ai_select_best_with_gpt(keyword, top_5_df)
                             else:
                                 best_choice_df, message = None, "数据类型错误"
                             if message == "Success" and best_choice_df is not None and not best_choice_df.empty:
