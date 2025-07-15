@@ -8,7 +8,7 @@ from collections import Counter
 from openai import OpenAI
 from search_utils import (format_row, search_with_keywords, expand_keyword_with_synonyms, classify_tokens, expand_token_with_synonyms_and_units,
     normalize_material, split_with_synonyms, get_synonym_words, expand_unit_tokens, get_db_engine, load_data, insert_product, delete_products,
-    ai_select_best_with_gpt)
+    ai_select_best_with_gpt,prioritize_liansu)
 import hashlib
 
 # — 页面配置：宽屏布局、标题 —
@@ -185,10 +185,10 @@ if page == "查询产品":
         )
         if st.button("🤖 AI 优选", use_container_width=True, disabled=not can_ai_select):
             with st.spinner("🤖 AI 正在分析最佳匹配..."):
-                top_3_df = st.session_state.last_out.head(3)
-                if isinstance(top_3_df, pd.DataFrame):
+                top_5_df = st.session_state.last_out.head(5)
+                if isinstance(top_5_df, pd.DataFrame):
                     best_choice_df, message = ai_select_best_with_gpt(
-                        st.session_state.keyword, top_3_df
+                        st.session_state.keyword, top_5_df
                     )
                 else:
                     best_choice_df, message = None, "数据类型错误"
@@ -206,9 +206,14 @@ if page == "查询产品":
     # 查询结果展示和购物车操作（无论是否刚点了查询按钮，只要有结果都显示）
     out_df = st.session_state.get("last_out", pd.DataFrame())
     if not out_df.empty and isinstance(out_df, pd.DataFrame):
-        # 联塑优先排序
-        from search_utils import prioritize_liansu
         out_df = prioritize_liansu(out_df)
+        if "匹配度" in out_df.columns and "_liansu_priority" in out_df.columns:
+            out_df = out_df.sort_values(["_liansu_priority", "匹配度"], ascending=[False, False]).reset_index(drop=True)
+            out_df = out_df.drop("_liansu_priority", axis=1)
+        elif "匹配度" in out_df.columns:
+            out_df = out_df.sort_values("匹配度", ascending=False).reset_index(drop=True)
+        else:
+            out_df = out_df.reset_index(drop=True)
         st.dataframe(out_df, use_container_width=True)
         to_cart = st.multiselect(
             "选择要加入购物车的行",
@@ -351,7 +356,7 @@ elif page == "批量查询":
                     if strict_results:
                         candidates_df = pd.DataFrame(strict_results)
                         # Use AI to select from strict results (take top 5 to be safe with token limits)
-                        top_3_df = candidates_df.head(5)
+                        top_3_df = candidates_df.head(3)
                         if isinstance(top_3_df, pd.DataFrame):
                             best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
                         else:
