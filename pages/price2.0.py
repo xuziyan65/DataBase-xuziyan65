@@ -94,6 +94,10 @@ if page == "查询产品":
         qty = st.number_input(
             "数量", min_value=1, key="qty"
         )
+    # 新增英文关键词输入框
+    keyword_en = st.text_input(
+        "English Keyword (for searching Describrition_English)", key="keyword_en"
+    )
     mat_kw = st.text_input(
         "物料号搜索", key="mat_kw"
     )
@@ -175,6 +179,27 @@ if page == "查询产品":
                 else:
                     st.session_state.last_out = pd.DataFrame()
                     st.warning("⚠️ 未查询到符合条件的产品")
+
+        # 新增英文查询按钮
+        if st.button("查询英文描述", use_container_width=True):
+            keyword_en = st.session_state.get("keyword_en", "").strip()
+            qty = st.session_state.qty if "qty" in st.session_state else 1
+            base_cols = ["Material", "Describrition", "Describrition_English", "数量"]
+            price_col = st.session_state.price_type
+            show_cols = base_cols + [price_col]
+
+            if keyword_en:
+                results_en = search_with_keywords(df, keyword_en, "Describrition_English", strict=True)
+                if results_en:
+                    out_df = pd.DataFrame(results_en)
+                    out_df["数量"] = qty
+                    out_df = out_df[[col for col in show_cols if col in out_df.columns]]
+                    st.session_state.last_out = out_df
+                else:
+                    st.session_state.last_out = pd.DataFrame()
+                    st.warning("⚠️ 未查询到符合条件的英文产品")
+            else:
+                st.warning("请输入英文关键词")
 
     with query_c2:
         # The AI button is only active if there are fuzzy results to choose from
@@ -356,9 +381,9 @@ elif page == "批量查询":
                     if strict_results:
                         candidates_df = pd.DataFrame(strict_results)
                         # Use AI to select from strict results (take top 5 to be safe with token limits)
-                        top_5_df = candidates_df.head(5)
-                        if isinstance(top_5_df, pd.DataFrame):
-                            best_choice_df, message = ai_select_best_with_gpt(keyword, top_5_df)
+                        top_3_df = candidates_df.head(3)
+                        if isinstance(top_3_df, pd.DataFrame):
+                            best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
                         else:
                             best_choice_df, message = None, "数据类型错误"
                         if message == "Success" and best_choice_df is not None and not best_choice_df.empty:
@@ -373,9 +398,9 @@ elif page == "批量查询":
                             fuzzy_df = fuzzy_df.sort_values("匹配度", ascending=False)
                             
                             # Use AI to select from top 3 fuzzy results
-                            top_5_df = fuzzy_df.head(5)
-                            if isinstance(top_5_df, pd.DataFrame):
-                                best_choice_df, message = ai_select_best_with_gpt(keyword, top_5_df)
+                            top_3_df = fuzzy_df.head(3)
+                            if isinstance(top_3_df, pd.DataFrame):
+                                best_choice_df, message = ai_select_best_with_gpt(keyword, top_3_df)
                             else:
                                 best_choice_df, message = None, "数据类型错误"
                             if message == "Success" and best_choice_df is not None and not best_choice_df.empty:
