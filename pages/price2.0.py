@@ -57,6 +57,16 @@ engine = get_db_engine()
 for k, default in [("cart",[]),("last_out",pd.DataFrame()),("to_cart",[]),("to_remove",[])]:
     if k not in st.session_state:
         st.session_state[k] = default
+
+# 替换功能的session state
+if "replace_mode" not in st.session_state:
+    st.session_state.replace_mode = False
+if "replace_step" not in st.session_state:
+    st.session_state.replace_step = 1  # 1: 选择替换源, 2: 选择替换目标
+if "selected_replace_source" not in st.session_state:
+    st.session_state.selected_replace_source = None
+if "selected_replace_target" not in st.session_state:
+    st.session_state.selected_replace_target = None
 #把用户选中的查询结果条目加入购物车，并清空本次选择，支持多选批量添加
 def add_to_cart():
     for i in st.session_state.to_cart:
@@ -74,7 +84,7 @@ def remove_from_cart():
 
 # — 侧边栏导航 —
 st.sidebar.header("导  航")
-page = st.sidebar.radio("操作", ["查询产品", "批量查询", "添加产品", "删除产品"])
+page = st.sidebar.radio("操作", ["查询产品", "批量查询", "产品选择", "添加产品", "删除产品"])
 st.sidebar.markdown("---")
 st.sidebar.caption("Powered by Streamlit")
 
@@ -146,7 +156,8 @@ if page == "查询产品":
                 if not filtered.empty:
                     out_df = pd.DataFrame(filtered.copy())  # 强制DataFrame
                     out_df["数量"] = qty
-                    out_df = out_df[[col for col in show_cols if col in out_df.columns]]
+                    out_df["查询关键词"] = mat_kw  # 添加关键词列
+                    out_df = out_df[[col for col in show_cols if col in out_df.columns] + ["查询关键词"]]
                     st.session_state.last_out = out_df
                 else:
                     st.session_state.last_out = pd.DataFrame()
@@ -162,7 +173,8 @@ if page == "查询产品":
                         out_df["匹配度"] = [round(r[1], 2) for r in fuzzy_results]
                         out_df = out_df.sort_values("匹配度", ascending=False)
                         out_df["数量"] = qty
-                        show_cols_fuzzy = show_cols + ["匹配度"]
+                        out_df["查询关键词"] = st.session_state.keyword  # 添加关键词列
+                        show_cols_fuzzy = show_cols + ["匹配度", "查询关键词"]
                         out_df = out_df[[col for col in show_cols_fuzzy if col in out_df.columns]]
 
                         # -- 修改：直接返回所有模糊查询结果，而不是只显示前三名匹配度的结果 --
@@ -174,7 +186,8 @@ if page == "查询产品":
                 elif results:
                     out_df = pd.DataFrame(results)
                     out_df["数量"] = qty
-                    out_df = out_df[[col for col in show_cols if col in out_df.columns]]
+                    out_df["查询关键词"] = st.session_state.keyword  # 添加关键词列
+                    out_df = out_df[[col for col in show_cols if col in out_df.columns] + ["查询关键词"]]
                     st.session_state.last_out = out_df
                 else:
                     st.session_state.last_out = pd.DataFrame()
@@ -193,7 +206,8 @@ if page == "查询产品":
                 if results_en:
                     out_df = pd.DataFrame(results_en)
                     out_df["数量"] = qty
-                    out_df = out_df[[col for col in show_cols if col in out_df.columns]]
+                    out_df["查询关键词"] = keyword_en  # 添加英文关键词列
+                    out_df = out_df[[col for col in show_cols if col in out_df.columns] + ["查询关键词"]]
                     st.session_state.last_out = out_df
                 else:
                     st.session_state.last_out = pd.DataFrame()
@@ -239,36 +253,194 @@ if page == "查询产品":
             out_df = out_df.sort_values("匹配度", ascending=False).reset_index(drop=True)
         else:
             out_df = out_df.reset_index(drop=True)
+        
+        # 重新排列列顺序，将查询关键词放在第一列
+        if "查询关键词" in out_df.columns:
+            cols = ["查询关键词"] + [col for col in out_df.columns if col != "查询关键词"]
+            out_df = out_df[cols]
+        
+        # 重置索引，让序号从1开始
+        out_df = out_df.reset_index(drop=True)
+        out_df.index = out_df.index + 1
+        
         st.dataframe(out_df, use_container_width=True)
+        
+        # 购物车操作区域
+        st.subheader("购物车操作")
+        
+        # 选择要加入购物车的行
         to_cart = st.multiselect(
             "选择要加入购物车的行",
             options=list(out_df.index),
-            format_func=lambda i: format_row(i, out_df),
+            format_func=lambda i: f"序号 {i}: {format_row(i, out_df)}",
             key="to_cart"
         )
-        if st.button("添加到购物车", key="add_cart"):
-            for i in to_cart:
-                st.session_state.cart.append(out_df.loc[i].to_dict())
-            if "to_cart" in st.session_state:
-                del st.session_state["to_cart"]
-            st.success("✅ 已加入购物车")
+        
+        # 按钮布局
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            if st.button("添加到购物车", key="add_cart"):
+                for i in to_cart:
+                    # 将1开始的索引转换为0开始的索引
+                    actual_index = i - 1
+                    st.session_state.cart.append(out_df.iloc[actual_index].to_dict())
+                if "to_cart" in st.session_state:
+                    del st.session_state["to_cart"]
+                st.success("✅ 已加入购物车")
+        
+        with col2:
+            # 替换功能
+            if st.session_state.cart:
+                if st.button("🔄 替换购物车项目", key="replace_cart_item"):
+                    st.session_state.replace_mode = True
+                    st.session_state.replace_step = 1
+                    st.session_state.selected_replace_source = None
+                    st.session_state.selected_replace_target = None
+                    st.rerun()
+            else:
+                st.info("购物车为空，无法替换")
 
-    # 购物车只在有内容时显示
-    if st.session_state.cart:
-        cart_df = pd.DataFrame(st.session_state.cart)
-        st.dataframe(cart_df, use_container_width=True)
-        to_remove = st.multiselect(
-            "选择要删除的购物车条目",
-            options=list(cart_df.index),
-            format_func=lambda i: cart_df.loc[i, "产品描述"] if "产品描述" in cart_df.columns else cart_df.loc[i, "Describrition"],
-            key="to_remove"
-        )
-        if st.button("删除所选", key="del_cart_bottom"):
-            idxs = set(to_remove)
-            st.session_state.cart = [it for j, it in enumerate(st.session_state.cart) if j not in idxs]
-            if "to_remove" in st.session_state:
-                del st.session_state["to_remove"]
-            st.rerun()
+        # 替换弹窗
+        if st.session_state.replace_mode:
+            with st.container():
+                st.markdown("---")
+                st.subheader("🔄 替换购物车项目")
+                
+                if st.session_state.replace_step == 1:
+                    # 第一步：选择要用来替换的查询结果
+                    st.write("**步骤 1：选择要用来替换的产品**")
+                    st.write("请从以下查询结果中选择一个产品：")
+                    
+                    # 显示查询结果表格
+                    st.dataframe(out_df, use_container_width=True)
+                    
+                    # 选择方式
+                    selection_method = st.radio(
+                        "请选择选择方式：",
+                        ["通过序号选择", "通过下拉菜单选择"],
+                        key="selection_method_step1"
+                    )
+                    
+                    if selection_method == "通过序号选择":
+                        # 序号输入方式
+                        max_index = len(out_df) if not out_df.empty else 0
+                        index_input = st.number_input(
+                            f"请输入序号 (1-{max_index})",
+                            min_value=1,
+                            max_value=max_index,
+                            value=1,
+                            key="replace_source_index"
+                        )
+                        
+                        # 显示选中序号对应的产品信息
+                        if not out_df.empty and 1 <= index_input <= len(out_df):
+                            selected_row = out_df.iloc[index_input - 1]  # 转换为0基索引
+                            st.info(f"当前选中序号 {index_input} 的产品：{selected_row.get('Describrition', 'N/A')}")
+                            replace_source = index_input - 1  # 转换为0基索引用于后续操作
+                        else:
+                            st.warning("请输入有效的序号")
+                            replace_source = None
+                    
+                    else:
+                        # 下拉菜单方式
+                        replace_source = st.selectbox(
+                            "选择要用来替换的产品",
+                            options=list(out_df.index),
+                            format_func=lambda i: f"序号 {i}: {format_row(i, out_df)}",
+                            key="replace_source_select"
+                        )
+                    
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        if st.button("继续", key="continue_to_step2"):
+                            st.session_state.selected_replace_source = replace_source
+                            st.session_state.replace_step = 2
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("取消", key="cancel_replace"):
+                            st.session_state.replace_mode = False
+                            st.session_state.replace_step = 1
+                            st.session_state.selected_replace_source = None
+                            st.session_state.selected_replace_target = None
+                            st.rerun()
+                
+                elif st.session_state.replace_step == 2:
+                    # 第二步：选择要替换的购物车项目
+                    st.write("**步骤 2：选择要替换的购物车项目**")
+                    st.write("请从购物车中选择要替换的项目：")
+                    
+                    # 显示购物车表格
+                    cart_df = pd.DataFrame(st.session_state.cart)
+                    if "查询关键词" in cart_df.columns:
+                        cols = ["查询关键词"] + [col for col in cart_df.columns if col != "查询关键词"]
+                        cart_df = cart_df[cols]
+                    
+                    # 重置索引，让序号从1开始
+                    cart_df = cart_df.reset_index(drop=True)
+                    cart_df.index = cart_df.index + 1
+                    
+                    st.dataframe(cart_df, use_container_width=True)
+                    
+                    # 选择方式
+                    selection_method_step2 = st.radio(
+                        "请选择选择方式：",
+                        ["通过序号选择", "通过下拉菜单选择"],
+                        key="selection_method_step2"
+                    )
+                    
+                    if selection_method_step2 == "通过序号选择":
+                        # 序号输入方式
+                        max_cart_index = len(cart_df) if not cart_df.empty else 0
+                        cart_index_input = st.number_input(
+                            f"请输入购物车序号 (1-{max_cart_index})",
+                            min_value=1,
+                            max_value=max_cart_index,
+                            value=1,
+                            key="replace_target_index"
+                        )
+                        
+                        # 显示选中序号对应的购物车项目信息
+                        if not cart_df.empty and 1 <= cart_index_input <= len(cart_df):
+                            selected_cart_row = cart_df.iloc[cart_index_input - 1]  # 转换为0基索引
+                            st.info(f"当前选中序号 {cart_index_input} 的购物车项目：{selected_cart_row.get('Describrition', 'N/A')}")
+                            replace_target = cart_index_input - 1  # 转换为0基索引用于后续操作
+                        else:
+                            st.warning("请输入有效的序号")
+                            replace_target = None
+                    
+                    else:
+                        # 下拉菜单方式
+                        replace_target = st.selectbox(
+                            "选择要替换的购物车项目",
+                            options=list(cart_df.index),
+                            format_func=lambda i: f"序号 {i}: {cart_df.loc[i, 'Describrition'] if 'Describrition' in cart_df.columns else cart_df.loc[i, '产品描述']}",
+                            key="replace_target_select"
+                        )
+                    
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        if st.button("应用替换", key="apply_replace"):
+                            if st.session_state.selected_replace_source is not None and replace_target is not None:
+                                # 执行替换
+                                new_item = out_df.loc[st.session_state.selected_replace_source].to_dict()
+                                st.session_state.cart[replace_target] = new_item
+                                st.success("✅ 替换成功！")
+                                # 重置状态
+                                st.session_state.replace_mode = False
+                                st.session_state.replace_step = 1
+                                st.session_state.selected_replace_source = None
+                                st.session_state.selected_replace_target = None
+                                st.rerun()
+                    
+                    with col2:
+                        if st.button("返回", key="back_to_step1"):
+                            st.session_state.replace_step = 1
+                            st.session_state.selected_replace_source = None
+                            st.rerun()
+
+
 
 elif page == "批量查询":
     st.header("📦 批量导入查询")
@@ -410,6 +582,7 @@ elif page == "批量查询":
                     if best_choice_df is not None and not best_choice_df.empty:
                         selected_item = best_choice_df.iloc[0].to_dict()
                         selected_item['数量'] = quantity
+                        selected_item['查询关键词'] = keyword  # 添加查询关键词
                         # 新增：AW给水或D排水人工核查提示
                         descr = selected_item.get('Describrition', '')
                         if ("AW给水" in descr) or ("D排水" in descr):
@@ -426,7 +599,8 @@ elif page == "批量查询":
                             "Material": "无",
                             "Describrition": f"未找到：{keyword}",
                             "Describrition_English": "",
-                            "数量": quantity
+                            "数量": quantity,
+                            "查询关键词": keyword  # 添加查询关键词
                             # 你可以根据实际表结构补充其它字段
                         }
                         if check_msg:
@@ -446,17 +620,57 @@ elif page == "批量查询":
             if results_log:
                 st.dataframe(pd.DataFrame(results_log), use_container_width=True)
             
-            # Rerun to update the cart display on the main page if needed,
-            # but showing it here might be better ux
-            if st.session_state.cart:
-                st.subheader("🛒 当前购物车")
-                cart_df = pd.DataFrame(st.session_state.cart)
-                show_cols = [
-                    "序号","Material","Describrition","Describrition_English", "出厂价_含税","出厂价_不含税","匹配度","人工核查提示"
-                ]
-                # 只保留存在于cart_df中的列
-                show_cols = [col for col in show_cols if col in cart_df.columns]
-                st.dataframe(cart_df[show_cols], use_container_width=True)
+
+
+elif page == "产品选择":
+    st.header("🛒 产品选择")
+    
+    # 购物车展示和管理
+    if st.session_state.cart:
+        st.subheader("当前购物车")
+        cart_df = pd.DataFrame(st.session_state.cart)
+        
+        # 重新排列列顺序，将查询关键词放在第一列（如果存在）
+        if "查询关键词" in cart_df.columns:
+            cols = ["查询关键词"] + [col for col in cart_df.columns if col != "查询关键词"]
+            cart_df = cart_df[cols]
+        
+        # 重置索引，让序号从1开始
+        cart_df = cart_df.reset_index(drop=True)
+        cart_df.index = cart_df.index + 1
+        
+        # 显示购物车内容
+        st.dataframe(cart_df, use_container_width=True)
+        
+        # 删除功能
+        to_remove = st.multiselect(
+            "选择要删除的购物车条目",
+            options=list(cart_df.index),
+            format_func=lambda i: f"序号 {i}: {cart_df.loc[i, 'Describrition'] if 'Describrition' in cart_df.columns else cart_df.loc[i, '产品描述']}",
+            key="to_remove_cart"
+        )
+        
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("删除所选", key="del_cart_selection"):
+                # 将1开始的索引转换为0开始的索引
+                idxs = set([i - 1 for i in to_remove])
+                st.session_state.cart = [it for j, it in enumerate(st.session_state.cart) if j not in idxs]
+                if "to_remove_cart" in st.session_state:
+                    del st.session_state["to_remove_cart"]
+                st.rerun()
+        
+        with col2:
+            if st.button("清空购物车", key="clear_cart"):
+                st.session_state.cart = []
+                st.rerun()
+        
+        # 显示购物车统计信息
+        total_items = len(st.session_state.cart)
+        st.info(f"购物车中共有 {total_items} 个产品")
+        
+    else:
+        st.info("购物车为空，请先在\"查询产品\"或\"批量查询\"页面添加产品")
 
 elif page == "添加产品":
     st.header(" 添加新产品到数据库")

@@ -1,6 +1,6 @@
 streamlit
 pandas
-SQLAlchemy      # 必填，注意大写“S”
-pymysql         # 如果你用的是 mysql+pymysql 驱动
+SQLAlchemy
+pymysql
 openai
 openpyxl
