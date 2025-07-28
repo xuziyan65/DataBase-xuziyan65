@@ -1,0 +1,9 @@
+# Streamlit-specific
+/.streamlit/secrets.toml
+
+# Python virtual environment
+database/
+
+# Python cache
+__pycache__/
+*.pyc 
