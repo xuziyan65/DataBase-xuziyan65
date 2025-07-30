@@ -44,7 +44,7 @@ inch_to_mm_ppr = {v: k for k, v in mm_to_inch_ppr.items()}
 
 @st.cache_resource
 def get_db_engine():
-    DB_PATH = Path(__file__).resolve().parents[1] / "Product2.db"
+    DB_PATH = Path(__file__).resolve().parents[1] / "Product.db"
     engine = create_engine(
         f"sqlite:///{DB_PATH}",
         connect_args={"check_same_thread": False},
