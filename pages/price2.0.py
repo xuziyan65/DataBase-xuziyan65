@@ -111,10 +111,22 @@ if page == "查询产品":
     mat_kw = st.text_input(
         "物料号搜索", key="mat_kw"
     )
-    price_type = st.selectbox(
-        "价格字段", ["出厂价_含税","出厂价_不含税"],
-        key="price_type"
+    
+    # 价格级别选择框
+    price_levels = [
+        "全部显示",
+        "二级代理A级别",
+        "一级代理B级别", 
+        "聚万大客户C级别",
+        "青山大客户D级别",
+        "大唐大客户E级别包运费"
+    ]
+    selected_price_level = st.selectbox(
+        "选择价格级别",
+        options=price_levels,
+        key="price_level"
     )
+    
     fuzzy_mode = st.checkbox(
         "未查到结果时启用模糊查找（并显示匹配度）",
         key="fuzzy_mode"
@@ -144,10 +156,27 @@ if page == "查询产品":
             out_df = pd.DataFrame()
             qty = st.session_state.qty if "qty" in st.session_state else 1
             
-            # 根据价格字段选择，动态决定要显示的列
-            base_cols = ["Material", "Describrition", "Describrition_English", "数量"]
-            price_col = st.session_state.price_type
-            show_cols = base_cols + [price_col]
+            # 根据选择的价格级别动态显示列
+            base_cols = ["Material", "Describrition", "Describrition_English", "数量", "采购不含税"]
+            exclude_cols = ["出厂价_含税", "出厂价_不含税", "NO"]
+            
+            # 价格级别映射（采购不含税始终显示，所以从映射中移除）
+            price_level_mapping = {
+                "二级代理A级别": ["二级代理A级别_利润率", "二级代理A级别_报单价格"],
+                "一级代理B级别": ["一级代理B级别_利润率", "一级代理B级别_报单价格"],
+                "聚万大客户C级别": ["聚万大客户C级别_利润率", "聚万大客户C级别_报单价格"],
+                "青山大客户D级别": ["青山大客户D级别_利润率", "青山大客户D级别_报单价格"],
+                "大唐大客户E级别包运费": ["大唐大客户E级别包运费_利润率", "大唐大客户E级别包运费_报单价格"]
+            }
+            
+            if selected_price_level == "全部显示":
+                # 显示除了出厂价和NO之外的所有列
+                all_cols = [col for col in df.columns if col not in exclude_cols]
+                show_cols = base_cols + [col for col in all_cols if col not in base_cols]
+            else:
+                # 显示基础信息 + 采购不含税 + 选择的价格级别对应的列
+                selected_cols = price_level_mapping.get(selected_price_level, [])
+                show_cols = base_cols + selected_cols
 
             # 优先物料号精确查找
             mat_kw = st.session_state.get("mat_kw", "").strip()
@@ -193,13 +222,31 @@ if page == "查询产品":
                     st.session_state.last_out = pd.DataFrame()
                     st.warning("⚠️ 未查询到符合条件的产品")
 
-        # 新增英文查询按钮
+                    # 新增英文查询按钮
         if st.button("查询英文描述", use_container_width=True):
             keyword_en = st.session_state.get("keyword_en", "").strip()
             qty = st.session_state.qty if "qty" in st.session_state else 1
-            base_cols = ["Material", "Describrition", "Describrition_English", "数量"]
-            price_col = st.session_state.price_type
-            show_cols = base_cols + [price_col]
+            base_cols = ["Material", "Describrition", "Describrition_English", "数量", "采购不含税"]
+            exclude_cols = ["出厂价_含税", "出厂价_不含税", "NO"]
+            
+            # 价格级别映射（采购不含税始终显示，所以从映射中移除）
+            price_level_mapping = {
+                "二级代理A级别": ["二级代理A级别_利润率", "二级代理A级别_报单价格"],
+                "一级代理B级别": ["一级代理B级别_利润率", "一级代理B级别_报单价格"],
+                "聚万大客户C级别": ["聚万大客户C级别_利润率", "聚万大客户C级别_报单价格"],
+                "青山大客户D级别": ["青山大客户D级别_利润率", "青山大客户D级别_报单价格"],
+                "大唐大客户E级别包运费": ["大唐大客户E级别包运费_利润率", "大唐大客户E级别包运费_报单价格"]
+            }
+            
+            selected_price_level = st.session_state.get("price_level", "全部显示")
+            if selected_price_level == "全部显示":
+                # 显示除了出厂价和NO之外的所有列
+                all_cols = [col for col in df.columns if col not in exclude_cols]
+                show_cols = base_cols + [col for col in all_cols if col not in base_cols]
+            else:
+                # 显示基础信息 + 采购不含税 + 选择的价格级别对应的列
+                selected_cols = price_level_mapping.get(selected_price_level, [])
+                show_cols = base_cols + selected_cols
 
             if keyword_en:
                 results_en = search_with_keywords(df, keyword_en, "Describrition_English", strict=True)
@@ -722,11 +769,12 @@ elif page == "添加产品":
         for col in cols:
             if col == "序号":
                 continue
-            label = col + ("（必填）" if col in ["Describrition","出厂价_含税","出厂价_不含税"] else "")
+            # 跳过出厂价字段和NO字段
+            if col in ["出厂价_含税","出厂价_不含税","NO"]:
+                continue
+            label = col + ("（必填）" if col in ["Describrition"] else "")
             dtype = df0[col].dtype
-            if col in ["出厂价_含税","出厂价_不含税"]:
-                new_vals[col] = st.text_input(label, key=f"add_{col}")
-            elif pd.api.types.is_integer_dtype(dtype):
+            if pd.api.types.is_integer_dtype(dtype):
                 new_vals[col] = st.number_input(label, step=1, format="%d", key=f"add_{col}")
             elif pd.api.types.is_float_dtype(dtype):
                 new_vals[col] = st.number_input(label, format="%.2f", key=f"add_{col}")
@@ -737,7 +785,7 @@ elif page == "添加产品":
 
     if submitted:
         missing = [
-            f for f in ["Describrition","出厂价_含税","出厂价_不含税"]
+            f for f in ["Describrition"]
             if not new_vals.get(f) or (isinstance(new_vals[f], str) and not new_vals[f].strip())
         ]
         if missing:
