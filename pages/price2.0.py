@@ -312,8 +312,12 @@ if page == "查询产品":
                     st.write("**步骤 1：选择要用来替换的产品**")
                     st.write("请从以下查询结果中选择一个产品：")
                     
+                    # 确保out_df有连续的索引，并设置1基索引
+                    out_df_for_replace = out_df.reset_index(drop=True)
+                    out_df_for_replace.index = out_df_for_replace.index + 1
+                    
                     # 显示查询结果表格
-                    st.dataframe(out_df, use_container_width=True)
+                    st.dataframe(out_df_for_replace, use_container_width=True)
                     
                     # 选择方式
                     selection_method = st.radio(
@@ -324,7 +328,7 @@ if page == "查询产品":
                     
                     if selection_method == "通过序号选择":
                         # 序号输入方式
-                        max_index = len(out_df) if not out_df.empty else 0
+                        max_index = len(out_df_for_replace) if not out_df_for_replace.empty else 0
                         index_input = st.number_input(
                             f"请输入序号 (1-{max_index})",
                             min_value=1,
@@ -334,8 +338,8 @@ if page == "查询产品":
                         )
                         
                         # 显示选中序号对应的产品信息
-                        if not out_df.empty and 1 <= index_input <= len(out_df):
-                            selected_row = out_df.iloc[index_input - 1]  # 转换为0基索引
+                        if not out_df_for_replace.empty and 1 <= index_input <= len(out_df_for_replace):
+                            selected_row = out_df_for_replace.iloc[index_input - 1]  # 转换为0基索引
                             st.info(f"当前选中序号 {index_input} 的产品：{selected_row.get('Describrition', 'N/A')}")
                             replace_source = index_input - 1  # 转换为0基索引用于后续操作
                         else:
@@ -346,8 +350,8 @@ if page == "查询产品":
                         # 下拉菜单方式
                         replace_source = st.selectbox(
                             "选择要用来替换的产品",
-                            options=list(out_df.index),
-                            format_func=lambda i: f"序号 {i}: {format_row(i, out_df)}",
+                            options=list(out_df_for_replace.index),
+                            format_func=lambda i: f"序号 {i}: {format_row(i, out_df_for_replace)}",
                             key="replace_source_select"
                         )
                     
@@ -370,6 +374,9 @@ if page == "查询产品":
                     # 第二步：选择要替换的购物车项目
                     st.write("**步骤 2：选择要替换的购物车项目**")
                     st.write("请从购物车中选择要替换的项目：")
+                    
+                    # 重新获取out_df_for_replace，确保在第二步中也能访问
+                    out_df_for_replace = out_df.reset_index(drop=True)
                     
                     # 显示购物车表格
                     cart_df = pd.DataFrame(st.session_state.cart)
@@ -422,17 +429,29 @@ if page == "查询产品":
                     col1, col2 = st.columns([1, 1])
                     with col1:
                         if st.button("应用替换", key="apply_replace"):
+                            # 添加调试信息
+                            st.write(f"调试信息：")
+                            st.write(f"- selected_replace_source: {st.session_state.selected_replace_source}")
+                            st.write(f"- replace_target: {replace_target}")
+                            st.write(f"- out_df_for_replace长度: {len(out_df_for_replace)}")
+                            st.write(f"- cart长度: {len(st.session_state.cart)}")
+                            
                             if st.session_state.selected_replace_source is not None and replace_target is not None:
-                                # 执行替换
-                                new_item = out_df.loc[st.session_state.selected_replace_source].to_dict()
-                                st.session_state.cart[replace_target] = new_item
-                                st.success("✅ 替换成功！")
-                                # 重置状态
-                                st.session_state.replace_mode = False
-                                st.session_state.replace_step = 1
-                                st.session_state.selected_replace_source = None
-                                st.session_state.selected_replace_target = None
-                                st.rerun()
+                                try:
+                                    # 执行替换 - 使用iloc而不是loc来避免索引问题
+                                    new_item = out_df_for_replace.iloc[st.session_state.selected_replace_source].to_dict()
+                                    st.session_state.cart[replace_target] = new_item
+                                    st.success("✅ 替换成功！")
+                                    # 重置状态
+                                    st.session_state.replace_mode = False
+                                    st.session_state.replace_step = 1
+                                    st.session_state.selected_replace_source = None
+                                    st.session_state.selected_replace_target = None
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"替换失败：{str(e)}")
+                                    st.error(f"调试信息：selected_replace_source={st.session_state.selected_replace_source}, replace_target={replace_target}")
+                                    st.error(f"out_df长度：{len(out_df)}, cart长度：{len(st.session_state.cart)}")
                     
                     with col2:
                         if st.button("返回", key="back_to_step1"):
